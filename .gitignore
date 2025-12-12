@@ -1,0 +1,50 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.h5
+*.hdf5
+*.ckpt
+*.pt
+*.pth
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.nbconvert.ipynb
+
+# --- Modelos y pesos ---
+models/*.h5
+models/*.hdf5
+models/*.ckpt
+models/*.pt
+models/*.pth
+
+# --- Datos pesados ---
+data/*.csv
+data/*.edf
+data/*.mat
+data/*.npy
+data/*.npz
+data/*.zip
+data/*.tar
+data/*.tar.gz
+
+# --- Logs ---
+logs/
+*.log
+*.out
+
+# --- TensorFlow / Keras ---
+*.pb
+*.tflite
+*.lite
+*.savedmodel
+
+# --- VSCode ---
+.vscode/
+
+# --- Sistema operativo ---
+.DS_Store
+Thumbs.db
