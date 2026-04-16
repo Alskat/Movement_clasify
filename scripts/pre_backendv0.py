@@ -11,6 +11,7 @@ from typing import List
 from sklearn.preprocessing import StandardScaler
 import re #Para buscar el número final
 import glob #Para buscar archivos con tipos específicos
+#Este código ya no sirve para nada we ball
 
 class EEGPreprocess: 
 
