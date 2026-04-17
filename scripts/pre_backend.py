@@ -14,7 +14,8 @@ import glob #Para buscar archivos con tipos específicos
 
 class EEGPreprocess: 
 
-    def __init__(self, channels = None, l_freq = 8, h_freq = 30.0, use_notch = True, notch_freqs = (50,), resample_freq = False, new_freq = 128, Window_size = 1.0, tmin = 0.5, tmax =3.5, Debug = False):
+    def __init__(self, channels = None, l_freq = 8, h_freq = 30.0, use_notch = True, notch_freqs = (50,), window_size = 1.0, window_step = 0.5,
+                new_freq = None, tmin = 0.5, tmax =3.5, Debug = False):
 
         #Parámetros de salida de nuestro array:
         self.X = None
@@ -30,11 +31,12 @@ class EEGPreprocess:
         self.l_freq = l_freq
         self.h_freq = h_freq
         self.use_notch = use_notch
-        self.resample_freq = resample_freq
-        self.new_freq = new_freq
-        self.Window_size = Window_size
+        
+        self.new_freq = new_freq #Recordatorio: crear función de resampleo en caso de 
         self.tmin = tmin
         self.tmax = tmax
+        self.windows = window_size
+        self.window_step = window_step
         self.Debug = Debug
         self.notch_freqs = notch_freqs
 
@@ -151,6 +153,8 @@ class EEGPreprocess:
 
         #Bien, llegó la hora de llenar cada uno de estos arrays B) 
 
+        print(f"Total de archivos a procesar: {len(array)} en {len(set([rec['subject'] for rec in array]))} sujetos")
+
         for record in array:
             path = record["path"]
             event_id = record["event_id"]
@@ -165,7 +169,7 @@ class EEGPreprocess:
 
             #2) Obtener labels y demás metadatos
 
-            labels, mode = self._get_labels(raw, event_id) #Genial! ya tenemos etiquetas y el raw! vamos con lo siguiente:}
+            labels, mode = self._get_labels(event_id) #Genial! ya tenemos etiquetas y el raw! vamos con lo siguiente:}
 
             #3) Preprocesar el raw 
 
@@ -173,7 +177,7 @@ class EEGPreprocess:
 
             #4) Epocar el raw limpio con las etiquetas obtenidas
 
-            epochs = self._epochs(clean, labels)
+            epochs = self._epochs(clean, labels, tmin=self.tmin, tmax=self.tmax) #Obtenemos las épocas con sus respectivas etiquetas, listas para ser windowizadas
 
             #5) Eliminar épocas con artefactos
 
@@ -186,7 +190,7 @@ class EEGPreprocess:
 
             #Habemus primeros datos para las listas!
 
-            X, y, trial = self._window(epochs)
+            X, y, trial = self._window(epochs, size=self.windows, step=self.window_step)
 
             #Faltan sub, run y trial
 
@@ -207,16 +211,24 @@ class EEGPreprocess:
         self.run = np.concatenate(run_list, axis=0)
         self.trial = np.concatenate(trial_list, axis=0)
 
+        #Ahora debemos transformar y a un formato numérico
+
+        self._idx(self.y)
+
+        print(f"Datos procesados: {self.X.shape[0]} ventanas, {self.X.shape[1]} canales, {self.X.shape[2]} muestras por ventana.")
+
+        #Y crear diccionario para los canales
+        self.channels_names = epochs.ch_names
+        
+
+        #Y terminamos de llenar el resto de metadatos 
+
+        
+        self.n_channels = self.X.shape[1]
+        self.n_samples = self.X.shape[0]
+
         return self
             
-
-
-
-
-
-
-
-
 
     def _load_raw(self, path: str) -> mne.io.Raw:
 
@@ -239,7 +251,7 @@ class EEGPreprocess:
 
         return raw
     
-    def _get_labels(self, raw: mne.io.Raw, event_id: int) -> mne.io.Raw:
+    def _get_labels(self,  event_id: int) -> mne.io.Raw:
 
         if self.Debug:
             print(f" Evento ID: {event_id}, Sujeto ID: {event_id}")
@@ -284,6 +296,17 @@ class EEGPreprocess:
         #Rereferenciado 
         raw_clean.set_eeg_reference(ref, verbose='ERROR')
 
+        self.sfreq = raw_clean.info['sfreq']
+
+        if self.new_freq is not None:
+            if self.new_freq != self.sfreq:
+                print(f"Se cambiará la frecuencia de muestreo de {self.sfreq} Hz a {self.new_freq} Hz (upsampling).")
+                raw_clean.resample(self.new_freq, verbose='ERROR')
+                self.sfreq = self.new_freq
+            else: 
+                print(f"La frecuencia de muestreo ya es {self.sfreq} Hz, no se realizará resampleo.")
+
+
         elapsed_ms = (perf_counter() - t0) * 1000.0
         return raw_clean, elapsed_ms
     
@@ -295,7 +318,7 @@ class EEGPreprocess:
         tmin: float = -0.5,
         tmax: float = 2.5,
         preload: bool = True,
-        scale: str = 'Medium', # 'Small', 'Medium', 'Large',
+        scale: str = 'Medium', # 'Small', 'Medium', 'Large', #Esto es sólo para ver la señal. no recomendable en backend!
         show: bool = False,
         start: float = 0.0,
         duration: float = 20.0,
@@ -386,7 +409,7 @@ class EEGPreprocess:
             event_id=event_id,
             tmin=tmin, 
             tmax=tmax,
-            baseline=(None, 0.0),  # baseline hasta evento, más estándar
+            baseline=(None, 0.5),  # baseline hasta evento, más estándar
             preload=preload, 
             verbose=verbose
         )
@@ -545,7 +568,86 @@ class EEGPreprocess:
         print(f"✔️ stack_3d: Datos válidos: {X_total.shape[0]} ventanas.")
         return X_total, y_total
 
+    def _idx(self, y: np.ndarray) -> None: #Transformar etiquetas a formato numérico
 
+        self.class_names = [
+        "rest",    # 0
+        "right_i", # 1
+        "left_i",  # 2
+        "hands_i", # 3
+        "feet_i",  # 4
+        "right_m", # 5
+        "left_m",  # 6
+        "hands_m", # 7
+        "feet_m",  # 8
+    ]
+        
+        LABEL_TO_IDX = {name: i for i, name in enumerate(self.class_names)}
+        
+        unique_labels = np.unique(y)
 
+        if self.Debug:
+            print(f"Clases únicas antes de idx: {unique_labels}")
+        self.y = np.array([LABEL_TO_IDX[label] for label in y], dtype=np.int32)
 
-      
+    
+    def resume(self):
+        print("\n" + "="*50)
+        print("🧠 RESUMEN DEL DATASET EEG")
+        print("="*50)
+
+        # Estado
+        if self.X is None:
+            print("❌ Dataset no construido aún.")
+            return
+
+        # Dimensiones
+        print("\n📐 Dimensiones:")
+        print(f"X shape: {self.X.shape}")
+        print(f"y shape: {self.y.shape}")
+        print(f"Total muestras (ventanas): {self.X.shape[0]}")
+        print(f"Canales: {self.X.shape[1]}")
+        print(f"Muestras por ventana: {self.X.shape[2]}")
+
+        # Frecuencia
+        print("\n⏱ Frecuencia de muestreo:")
+        print(f"{self.sfreq} Hz")
+
+        # Canales
+        print("\n🧬 Canales:")
+        print(f"Número de canales: {len(self.channels_names)}")
+        print(f"Lista: {self.channels_names}")
+
+        # Clases
+        print("\n🧪 Clases:")
+        print(f"Número de clases: {len(self.class_names)}")
+        print(f"Lista: {self.class_names}")
+
+        # Distribución de clases
+        print("\n📊 Distribución de clases:")
+        unique, counts = np.unique(self.y, return_counts=True)
+        for u, c in zip(unique, counts):
+            print(f"{self.class_names[u]:10s}: {c}")
+
+        # Sujetos
+        print("\n👤 Sujetos:")
+        unique_sub, counts_sub = np.unique(self.sub, return_counts=True)
+        print(f"Total sujetos: {len(unique_sub)}")
+        for s, c in zip(unique_sub, counts_sub):
+            print(f"Sujeto {s:03d}: {c} muestras")
+
+        # Runs
+        print("\n🎮 Runs:")
+        unique_run, counts_run = np.unique(self.run, return_counts=True)
+        for r, c in zip(unique_run, counts_run):
+            print(f"Run {r:02d}: {c} muestras")
+
+        # Trials
+        print("\n🔁 Trials:")
+        unique_trials = np.unique(self.trial)
+        print(f"Total trials únicos: {len(unique_trials)}")
+
+        print("\n" + "="*50)
+
+        
+        
