@@ -4,7 +4,6 @@ import os
 from typing import Optional, Tuple, Union
 import numpy as np
 import mne
-import matplotlib.pyplot as plt
 from time import perf_counter
 from pathlib import Path
 from typing import List
@@ -21,7 +20,7 @@ class EEGPreprocess:
         self.X = None
         self.y = None
         self.sub = None
-        self.data_dir = None
+        self.name = None
         self.run = None #Sección del sujeto
         self.trial = None #ID de la partición de la prueba}
 
@@ -49,7 +48,9 @@ class EEGPreprocess:
         self.n_samples = None
         self.name = None
 
-    def load(self, path: Union[str, Path]):
+    def load(self, path: Union[str, Path], show_channels = False):
+
+        self.data_dir = path
 
         subject_dirs = [os.path.join(path, d) for d in os.listdir(path)]
         subject_dirs = [d for d in subject_dirs if os.path.isdir(d)] #Creamos un array con todas las carpetas
@@ -132,6 +133,15 @@ class EEGPreprocess:
 
                 if self.Debug:
                     print(f"Archivo {ff} agregado para procesamiento. Total archivos válidos hasta ahora: {len(self.array)}")
+
+        if show_channels:
+            print("\n🔍 Canales encontrados en el primer archivo válido:")
+            if self.array:
+                first_file = self.array[0]['path']
+                raw = mne.io.read_raw_edf(first_file, preload=False, verbose='ERROR')
+                print(raw.ch_names)
+            else:
+                print("No se encontraron archivos válidos para mostrar canales.")
 
 
 
@@ -226,6 +236,11 @@ class EEGPreprocess:
         
         self.n_channels = self.X.shape[1]
         self.n_samples = self.X.shape[0]
+
+        #Detectar inconsistencias en datos y levantar valores 
+
+        if len(self.y) != self.X.shape[0]:
+             raise ValueError(f"Longitud de y ({len(self.y)}) no coincide con número de ventanas en X ({self.X.shape[0]}).")
 
         return self
             
@@ -649,5 +664,36 @@ class EEGPreprocess:
 
         print("\n" + "="*50)
 
+    def save(self, path: Union[str, Path], name: str ) -> None:
+        if self.X is None or self.y is None:
+            raise ValueError("No hay datos para guardar. Asegúrate de haber llamado a build() primero.")
         
+        if name is None:
+            name = f"eeg_dataset_{self.name}.npz"
+
+        if path is None:
+            path = f"./{name}"
         
+        if not os.path.exists(os.path.dirname(path)):
+            os.makedirs(os.path.dirname(path))
+        
+        np.savez_compressed(
+            path,
+            name = name,
+            X=self.X.astype(np.float32),
+            y=self.y.astype(np.int32),
+            sub=self.sub.astype(np.int32),
+            run=self.run.astype(np.int32),
+            trial=self.trial.astype(np.int32),
+            class_names=np.array(self.class_names, dtype=object),
+            channel_names=np.array(self.channels_names, dtype=object),
+            sfreq=np.array([self.sfreq], dtype=np.float32),
+            window_size=np.array([self.windows], dtype=np.float32),
+            window_step=np.array([self.window_step], dtype=np.float32),
+            tmin=np.array([self.tmin], dtype=np.float32),
+            tmax=np.array([self.tmax], dtype=np.float32),
+        )
+
+        print(f"✔️ Dataset {name} guardado en: {path}!")
+
+            

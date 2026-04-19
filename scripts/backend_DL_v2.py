@@ -10,6 +10,14 @@ import sys
 import os
 
 
+
+
+#Librerías de sklearn y tf
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.models import clone_model
+
 project_path = "G:\\Mi unidad\\Tesis v1\\Movement_clasify"
 
 #Agregamos los modelos EEGnet a nuestro path
@@ -21,12 +29,6 @@ if os.path.exists(models_path):
     
 else:
     print("No se encontró directorio de modelos en", models_path)
-
-#Librerías de sklearn y tf
-from sklearn.model_selection import train_test_split
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from tensorflow.keras.models import clone_model
 
 #Personales
 from EEGModels import EEGNet  
@@ -40,6 +42,7 @@ from sklearn.metrics import (
     precision_recall_fscore_support
 )
 
+#0 
 
 #1 Vamos a crear la clase donde procesaremos todos los datos con el pick, el dataset
 class Selection:
@@ -47,8 +50,8 @@ class Selection:
     """La función de este nuevo objeto va a ser obtener los datos, pickear las clases que queremos, undersamplear
     la clase 0 (rest) si es necesario, y luego fusionar las clases motoras e imaginarias, para finalmente retornar
     los datos ya procesados, listos para el entrenamiento."""
-    def __init__(self, data, pick, undersample_rest=True, fusionar=True, random_state=42):
-        self.data = data
+    def __init__(self, pick=None, undersample_rest=True, fusionar=True, random_state=42):
+        
         self.pick = pick
         self.undersample_rest = undersample_rest #Esto nos ayuda a undersamplear la clase 0 a las demás clases
         self.fusionar = fusionar #Fusionar las clases mecánicas con las imaginarias
@@ -74,16 +77,101 @@ class Selection:
 
         #Ahora ejercemos nuestro pipeline, el cual era: pick, fusionar, luego después se elegirán los sujetos de entrenamiento
         
-        self._pipeline()
+    def load(self, path):   
+
+        #Creamos nuestro self.data acá
+
+        data = np.load(path, allow_pickle=True)
+
+        self.X = data["X"]
+        self.y = data["y"]
+        self.sub = data["sub"]
+        self.run = data["run"]
+        self.trial = data["trial"]
+
+        self.class_names = list(data["class_names"])
+        self.channels_names = list(data["channel_names"])
+        self.sfreq = float(data["sfreq"][0])
+
+        self.windows = float(data["window_size"][0])
+        self.window_step = float(data["window_step"][0])
+        self.tmin = float(data["tmin"][0])
+        self.tmax = float(data["tmax"][0])
+
+        # reconstrucción automática
+        self.n_channels = self.X.shape[1]
+        self.n_samples = self.X.shape[0]
+
+        print(f"✔️ Dataset cargado desde: {path}")
+
+        return self
     
-    def _pipeline(self, n=None):
+    def resume(self):
+        print("\n" + "="*50)
+        print("🧠 RESUMEN DEL DATASET EEG")
+        print("="*50)
+
+        # Estado
+        if self.X is None:
+            print("❌ Dataset no construido aún.")
+            return
+
+        # Dimensiones
+        print("\n📐 Dimensiones:")
+        print(f"X shape: {self.X.shape}")
+        print(f"y shape: {self.y.shape}")
+        print(f"Total muestras (ventanas): {self.X.shape[0]}")
+        print(f"Canales: {self.X.shape[1]}")
+        print(f"Muestras por ventana: {self.X.shape[2]}")
+
+        # Frecuencia
+        print("\n⏱ Frecuencia de muestreo:")
+        print(f"{self.sfreq} Hz")
+
+        # Canales
+        print("\n🧬 Canales:")
+        print(f"Número de canales: {len(self.channels_names)}")
+        print(f"Lista: {self.channels_names}")
+
+        # Clases
+        print("\n🧪 Clases:")
+        print(f"Número de clases: {len(self.class_names)}")
+        print(f"Lista: {self.class_names}")
+
+        # Distribución de clases
+        print("\n📊 Distribución de clases:")
+        unique, counts = np.unique(self.y, return_counts=True)
+        for u, c in zip(unique, counts):
+            print(f"{self.class_names[u]:10s}: {c}")
+
+        # Sujetos
+        print("\n👤 Sujetos:")
+        unique_sub, counts_sub = np.unique(self.sub, return_counts=True)
+        print(f"Total sujetos: {len(unique_sub)}")
+        for s, c in zip(unique_sub, counts_sub):
+            print(f"Sujeto {s:03d}: {c} muestras")
+
+        # Runs
+        print("\n🎮 Runs:")
+        unique_run, counts_run = np.unique(self.run, return_counts=True)
+        for r, c in zip(unique_run, counts_run):
+            print(f"Run {r:02d}: {c} muestras")
+
+        # Trials
+        print("\n🔁 Trials:")
+        unique_trials = np.unique(self.trial)
+        print(f"Total trials únicos: {len(unique_trials)}")
+
+        print("\n" + "="*50)
+            
+    def pipeline(self, n=None):
         #El pipeline principal consiste en aplicar un pick y luego una fusión, cosas que ya tenemos en otras clases 
         #n sólo es para limitar la cantidad de datos totales, no recuerdo porque lo quise añadir pero ahí está
     
         # Paso 1: Pickeo 
-        X = self.data["X"]
-        y = self.data["y"]
-        sub = self.data["subject"]
+        X = self.X
+        y = self.y
+        sub = self.sub
 
         if len(sub) != len(y):
             #Cortamos para que sean iguales
