@@ -2,6 +2,8 @@
 
 #Primero, importamos todas las librerías que ya teníamos antes 
 #Clásicas
+from pdb import run
+
 import numpy as np
 import pandas as pd
 
@@ -106,7 +108,7 @@ class Selection:
 
         return self
     
-    def resume(self):
+    def resume_dataset(self, subs=False):
         print("\n" + "="*50)
         print("🧠 RESUMEN DEL DATASET EEG")
         print("="*50)
@@ -115,6 +117,14 @@ class Selection:
         if self.X is None:
             print("❌ Dataset no construido aún.")
             return
+        
+        #Sujetos
+        print("\n👤 Sujetos únicos:")
+        print(f"Total sujetos: {len(np.unique(self.sub))}")
+        if subs:
+            unique_sub, counts_sub = np.unique(self.sub, return_counts=True)
+            for s, c in zip(unique_sub, counts_sub):
+                print(f"Sujeto {s:03d}: {c} muestras")
 
         # Dimensiones
         print("\n📐 Dimensiones:")
@@ -172,6 +182,8 @@ class Selection:
         X = self.X
         y = self.y
         sub = self.sub
+        trial = self.trial
+        run = self.run
 
         if len(sub) != len(y):
             #Cortamos para que sean iguales
@@ -179,6 +191,8 @@ class Selection:
             X = X[:min_len]
             y = y[:min_len]
             sub = sub[:min_len]
+            trial = trial[:min_len]
+            run = run[:min_len]
 
         # --- 1) Elegir clases a conservar ---
         if self.pick is not None:
@@ -187,6 +201,9 @@ class Selection:
             X = X[mask]
             y = y[mask]
             sub = sub[mask]
+            trial = trial[mask]
+            run = run[mask]
+
             if X.shape[0] == 0:
                 raise ValueError(f"No hay muestras para las clases {pick}.")
         else:
@@ -229,6 +246,8 @@ class Selection:
             X = X[:n]
             y = y[:n]
             sub = sub[:n]
+            trial = trial[:n]
+            run = run[:n]
             print(f"Seleccionando los primeros {n} de {total} datos tras el filtrado.")
 
         # --- 4) Remapeo de etiquetas a 0..C-1 ---
@@ -272,11 +291,11 @@ class Selection:
 
 
         if self.undersample_rest and 0 in pick:
-            self._undersample_rest(X, y_lr, sub) #Si queremos undersamplear la clase 0, lo hacemos después de fusionar, para que se ajuste a las clases fusionadas
+            self._undersample_rest(X, y_lr, sub, trial, run) #Si queremos undersamplear la clase 0, lo hacemos después de fusionar, para que se ajuste a las clases fusionadas
         else: 
-            self._build(X, y_lr, sub, self.pick) #Ahora construimos los atributos principaples
+            self._build(X, y_lr, sub, trial, run) #Ahora construimos los atributos principaples
 
-    def _undersample_rest(self, X, y, sub): 
+    def _undersample_rest(self, X, y, sub, trial, run): 
         
         pick = list(self.pick)
         rest_label = 0
@@ -303,15 +322,20 @@ class Selection:
                 X = X[idx_keep]
                 y = y[idx_keep]
                 sub = sub[idx_keep]
+                trial = trial[idx_keep]
+                run = run[idx_keep]
 
                 print(f"Undersampling: clase 0 recortada de {len(idx_rest)} a {max_other} muestras.")
             # si counts_others está vacío, significa que solo hay clase 0, no hacemos nada
-        self._build(X, y, sub) #Ahora construimos los atributos principaples
+        self._build(X, y, sub, trial, run) #Ahora construimos los atributos principaples
 
-    def _build(self, X, y, sub):
+    def _build(self, X, y, sub, trial, run):
         self.X = X
         self.y = y
-        self.sub = sub
+        self.sub = sub  
+        self.trial = trial
+        self.run = run
+        
 
         #Esto en teoría es sencillo, pero ahora, quiero hacer una tabla de clases únicamente porque sí, para esto necesitamos saber pick de nuevo 
         if self.fusionar is False: 
@@ -357,10 +381,12 @@ class Selection:
         self.label_map = dict(zip(self.clases["codigo"], self.clases["nombre"])) #Un diccionario que mapea el código de clase al nombre de clase, útil para interpretación y visualización
     
     
-    def resumen(self):
+    def resume_data(self):
         print(f"X shape: {self.X.shape}")
         print(f"y shape: {self.y.shape}")
         print(f"sub shape: {self.sub.shape}")
+        print(f"trial shape: {self.trial.shape}")
+        print(f"run shape: {self.run.shape}")
         print(f"Número de clases: {self.n_classes}")
         print(f"Número de sujetos: {self.n_subjects}")
         print("\nClases:")
@@ -376,114 +402,119 @@ class XYGroup:
         self.train = train
         self.val = val
         self.test = test
+        
 
 
 class DataSplit:
-    def __init__(self, X_train, X_val, X_test, y_train, y_val, y_test, sub_train=None, sub_val=None, sub_test=None):
+    def __init__(self, X_train, X_val, X_test, 
+                y_train, y_val, y_test, 
+                sub_train=None, sub_val=None, sub_test=None, 
+                trial_train=None, trial_val=None, trial_test=None, 
+                run_train=None, run_val=None, run_test=None):
         self.X = XYGroup(X_train, X_val, X_test)
         self.y = XYGroup(y_train, y_val, y_test)
         self.sub = XYGroup(sub_train, sub_val, sub_test)
+        self.trial = XYGroup(trial_train, trial_val, trial_test)
+        self.run = XYGroup(run_train, run_val, run_test)
 
 
 #1) Splitear los datos 
 
-def split_eeg(X, y, sub, test_size = 0.2, debug = False):
+def split_eeg(X, y, sub, trial, run, test_size=0.2, val_size=0.1, mode = None, debug=False): #chatgpt me puso esta función más bonita 
 
-    """Esta función dividirá los datos en train, val y test, 
-    No obstante, lo hará dependiendo de la cantidad de sujetos: 
-    Es decir, si hay pocos sujetos se hará un split normal con estratificación por clase, 
-    pero si hay suficientes sujetos, se hará un split por sujetos, para evitar data leakage entre train y test.
-    
-    SE RECOMIENDA SIEMRE TENER MAS DE 10 SUJETOS OR FAVOR """
+    assert len(X) == len(y) == len(sub) == len(trial) == len(run), "X, y, sub, trial y run deben tener la misma longitud!"
 
     unique_subj = np.unique(sub)
 
-    if (len(unique_subj) < 10):
-        #Armamos el train con stratify en clases y no sujetos: Debe entregar train, test y val
-                
-        X_train, X_temp, y_train, y_temp = train_test_split(
-            X, y,
-            test_size=test_size,
-            random_state=42,
-            stratify=y  # aquí sí estratificamos por clase
-        )
+    #Decidimos el modo de split
+    if mode is None and len(unique_subj) >= 10:
+        mode = "subject"
+        group = sub
+    elif mode is None and len(unique_subj) < 10:
+        mode = "trial"
+        group = trial
 
-        X_val, X_test, y_val, y_test = train_test_split(
-        X_temp, y_temp,
-        test_size=0.50,       
-        random_state=152,
-        stratify=y_temp
-        )
-
-        split_info = {
-            "mode": "class",
-            "n_subjects": len(unique_subj),
-            "n_train": len(y_train),
-            "n_val": len(y_val),
-            "n_test": len(y_test),
-        }
-        
-
-        return DataSplit(X_train, X_val, X_test, y_train, y_val, y_test), split_info
-
-
-    
-
-    #En caso de que hayan más de 10 sujetos, se complica un poco más:
-    else:
-        
-        #Spliteamos primero los sujetos
-        train_subj, test_subj = train_test_split( #Sujetos de prueba y de entrenamiento
-            unique_subj,
-            test_size=test_size,
-            random_state=13
-        )
+    elif mode == "subject":
+        group = sub
+    elif mode == "trial":
+        group = trial
+    elif mode == "run":
+        group = run
+    else: 
+        raise ValueError(f"Modo de split desconocido: {mode}. Opciones válidas: 'subject', 'trial', 'run' o None (auto).")
 
 
 
-        #Separamos los datos correspondientes para cada sujeto
-        mask_train = np.isin(sub, train_subj)
-        mask_test  = np.isin(sub, test_subj)
+    #Split universal
+    split = _split_by_group(
+        X, y, group,
+        test_size=test_size,
+        val_size=val_size
+    )
 
-        #Separaos train y test
-        X_train_full, y_train_full, sub_train_full = X[mask_train], y[mask_train], sub[mask_train]
-        X_test, y_test, sub_test = X[mask_test], y[mask_test], sub[mask_test]
+    # 🧠 INFO
+    split_info = {
+        "mode": mode,
+        "n_subjects": len(unique_subj),
+        "n_train": len(split.y.train),
+        "n_val": len(split.y.val),
+        "n_test": len(split.y.test),
+    }
 
-        if debug:
-            print("Tamaño de train vs test:", X_train_full.shape, X_test.shape)
-
-        #No recuerdo por qué en el semestre anterior estratifiqué por clases, pero acá siempre vamos a estratificar por sujetos
-
-        unique_subj_train = np.unique(sub_train_full)
-
-        train_subj_real, val_subj = train_test_split(
-            unique_subj_train,
-            test_size=0.15, #15% de los sujetos de entrenamiento para validación
-            random_state=24
-        )
-
-        #Separamos los datos correspondientes para cada sujeto
-        mask_train_real = np.isin(sub, train_subj_real)
-        mask_val  = np.isin(sub, val_subj)
-
-        #Separaos train y test
-        X_train, y_train, sub_train = X[mask_train_real], y[mask_train_real], sub[mask_train_real]
-        X_val, y_val, sub_val = X[mask_val], y[mask_val], sub[mask_val]
-
-        
-        split_info = {
-            "mode": "subject",
-            "n_subjects": len(unique_subj),
-            "train_subjects": train_subj,
-            "test_subjects": test_subj,
-        
-        }
-    
     if debug:
-        print("Modo split:", split_info["mode"])
-        print("X_train:", X_train.shape, "X_val:", X_val.shape, "X_test:", X_test.shape)
+        print("Modo split:", mode)
+        print("X_train:", split.X.train.shape)
+        print("X_val:", split.X.val.shape)
+        print("X_test:", split.X.test.shape)
 
-    return DataSplit(X_train, X_val, X_test, y_train, y_val, y_test, sub_train, sub_val, sub_test), split_info
+    return split, split_info
+
+def _split_by_group(X, y, group, test_size=0.2, val_size=0.1, random_state=42, debug=False): #Para qué nos vamos a mentir, yo hice el código pero Claude lo optimizó
+
+    # Validación
+    assert len(X) == len(y) == len(group), "X, y y group deben tener mismo largo"
+
+    # 1. Grupos únicos
+    unique_groups = np.unique(group)
+
+    # 2. Split train vs temp
+    train_groups, temp_groups = train_test_split(
+        unique_groups,
+        test_size=test_size + val_size,
+        random_state=random_state
+    )
+
+    # 3. Split temp → val + test
+    val_groups, test_groups = train_test_split(
+        temp_groups,
+        test_size=test_size / (test_size + val_size),
+        random_state=random_state
+    )
+
+    # 4. Máscaras
+    mask_train = np.isin(group, train_groups)
+    mask_val   = np.isin(group, val_groups)
+    mask_test  = np.isin(group, test_groups)
+
+    # 5. Aplicar
+    X_train, y_train, g_train = X[mask_train], y[mask_train], group[mask_train]
+    X_val, y_val, g_val       = X[mask_val], y[mask_val], group[mask_val]
+    X_test, y_test, g_test    = X[mask_test], y[mask_test], group[mask_test]
+
+    if debug:
+        print("Split por grupo:")
+        print(f"  Train: {len(X_train)} muestras, grupos: {np.unique(g_train)}")
+        print(f"  Val:   {len(X_val)} muestras, grupos: {np.unique(g_val)}")
+        print(f"  Test:  {len(X_test)} muestras, grupos: {np.unique(g_test)}")
+
+    return DataSplit(
+        X_train, X_val, X_test,
+        y_train, y_val, y_test,
+        g_train, g_val, g_test
+    )
+
+
+    
     
 #2) Normalización
 
@@ -553,12 +584,12 @@ def build_eegnet(classes, chans, signal_len,
     )
     return model
 
-def eeg_train(X, y, sub, test_size=0.2, classes=None, epochs=20, debug=False):
+def eeg_train(X, y, sub, trial, run, test_size=0.2, classes=None, epochs=20, debug=False):
     if classes is None:
         classes = len(np.unique(y))
 
     #1 Split 
-    split, info = split_eeg(X, y, sub, test_size=test_size, debug=debug)
+    split, info = split_eeg(X, y, sub, trial, run, test_size=test_size, debug=debug)
 
     #2 Normalización: importante sólo se normaliza X
 
