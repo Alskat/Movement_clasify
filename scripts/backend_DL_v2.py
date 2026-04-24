@@ -101,7 +101,7 @@ class Selection:
         self.run = data["run"]
         self.trial = data["trial"]
 
-        self.class_names = list(data["class_names"])
+        self.class_names_og = list(data["class_names"])
         self.channels_names = list(data["channel_names"])
         self.sfreq = float(data["sfreq"][0])
 
@@ -193,14 +193,14 @@ class Selection:
 
         # Clases
         print("\n🧪 Clases:")
-        print(f"Número de clases: {len(self.class_names)}")
-        print(f"Lista: {self.class_names}")
+        print(f"Número de clases: {len(self.class_names_og)}")
+        print(f"Lista: {self.class_names_og}")
 
         # Distribución de clases
         print("\n📊 Distribución de clases:")
         unique, counts = np.unique(self.y, return_counts=True)
         for u, c in zip(unique, counts):
-            print(f"{self.class_names[u]:10s}: {c}")
+            print(f"{self.class_names_og[u]:10s}: {c}")
 
         # Sujetos
         print("\n👤 Sujetos:")
@@ -222,7 +222,9 @@ class Selection:
 
         print("\n" + "="*50)
 
-    def pick_ch(self, selected_channels):
+    def pick_ch(self, selected_channels): 
+        """Esta función selecciona los canales que queremos usar, 
+        basándose en la lista de nombres de canales que tenemos en self.channels_names"""
 
         if self.channels_names is None:
             raise ValueError("No hay channel_names cargados")
@@ -258,8 +260,12 @@ class Selection:
         trial = self.trial
         run = self.run
 
-        if len(sub) != len(y):
+        if len(sub) != len(y): #En caso de que tengan diferentes longitudes 
             #Cortamos para que sean iguales
+
+            if self.Debug:
+                print("⚠️ Advertencia: sub y y tienen diferentes longitudes. Se cortarán al mínimo común.")
+                print(f"Longitud original - sub: {len(sub)}, y: {len(y)}")
             min_len = min(len(sub), len(y))
             X = X[:min_len]
             y = y[:min_len]
@@ -269,6 +275,8 @@ class Selection:
 
         # --- 1) Elegir clases a conservar ---
         if self.pick is not None:
+            if self.Debug:
+                print(f"✔ Aplicando pick: {self.pick}. . . ")
             pick = list(self.pick)
             mask = np.isin(y, pick)
             X = X[mask]
@@ -282,40 +290,14 @@ class Selection:
         else:
             # si no se especifica pick, usamos todas las clases presentes
             pick = sorted(np.unique(y).tolist())
+            if self.Debug:
+                print("✔ No se especificó pick, usando todas las clases presentes:", pick, ". . .")
 
-        # --- 2) Undersampling de la clase 0 (rest), si procede ---
-        """if self.undersample_rest and 0 in pick:
-            rest_label = 0
-            idx_rest = np.where(y == rest_label)[0]
-            idx_non_rest = np.where(y != rest_label)[0]
-
-            # conteos de las clases distintas de 0 (en el espacio original)
-            counts_others = []
-            for cls in pick:
-                if cls == rest_label:
-                    continue
-                counts_others.append(np.sum(y == cls))
-
-            if counts_others:  # por si solo hay la clase 0
-                max_other = max(counts_others)
-
-                if len(idx_rest) > max_other:
-                    rng = np.random.default_rng(self.random_state)
-                    idx_rest_sel = rng.choice(idx_rest, size=max_other, replace=False)
-
-                    idx_keep = np.concatenate([idx_rest_sel, idx_non_rest])
-                    rng.shuffle(idx_keep)
-
-                    X = X[idx_keep]
-                    y = y[idx_keep]
-                    sub = sub[idx_keep]
-
-                    print(f"Undersampling: clase 0 recortada de {len(idx_rest)} a {max_other} muestras.")"""
-            # si counts_others está vacío, significa que solo hay clase 0, no hacemos nada
-
-        # --- 3) Submuestreo adicional por cantidad n (opcional) ---
+        # --- 2) Submuestreo adicional por cantidad n (opcional) ---
         total = len(y)
         if n is not None and n < total:
+            if self.Debug:
+                print(f"✔ Aplicando submuestreo adicional: limitando a los primeros {n} de {total} datos. . . ")
             X = X[:n]
             y = y[:n]
             sub = sub[:n]
@@ -323,66 +305,123 @@ class Selection:
             run = run[:n]
             print(f"Seleccionando los primeros {n} de {total} datos tras el filtrado.")
 
-        # --- 4) Remapeo de etiquetas a 0..C-1 ---
-        #Acá reordenamos todas las etiquetas de y
-        unique_sorted = sorted(pick)
-        mapa = {old: new for new, old in enumerate(unique_sorted)}
-        y_new = np.vectorize(mapa.get)(y)
+        # --- 3) fusionar clases y remapear las etiquetas--- 
 
-        #return X, y_new, sub
-        #------------------------------------------------------
+        if self.fusionar:
+            y_final, class_names_final = self.semantic_fusion(y)
 
-        #Paso 2: Fusión de clases motoras e imaginarias 
-        """Recordemos las clases:
-    
-        "rest" -> 0
-        "right_i" -> 1
-        "left_i"->2
-        "hands_i" -> 3
-        "feet_i" -> 4
-        "right_m" -> 5
-        "left_m" -> 6
-        "hands_m" -> 7
-        "feet_m" -> 8"""
+            if self.Debug:
+                print("✔ Clases fusionadas semánticamente.")
+                print("Clases finales:", class_names_final)
+                print(dict(zip(*np.unique(y_final, return_counts=True))))
 
-        if self.fusionar: 
-            y_lr = y_new.copy()
+        else:
+            unique_sorted = sorted(np.unique(y))
+            mapa = {old: new for new, old in enumerate(unique_sorted)}
 
-            if len(np.unique(y_new)) == 9: #Son 5 clases en total, fusionamos motoras e imaginarias
-                y_lr[y_new==5] = 1
-                y_lr[y_new==6] = 2
-                y_lr[y_new==7] = 3
-                y_lr[y_new==8] = 4
+            y_final = np.array([mapa[val] for val in y], dtype=np.int32)
+            class_names_final = [self.class_names_og[old] for old in unique_sorted]
 
-            elif len(np.unique(y_new)) == 5: #3 clases en total (manos y pies o derecha e izquierda)
-                y_lr[y_new==3] = 1
-                y_lr[y_new==4] = 2
+            if self.Debug:
+                print("✔ Sin fusión. Solo remapeo.")
+                print("Clases finales:", class_names_final)
+                print(dict(zip(*np.unique(y_final, return_counts=True))))
 
-        else: 
-            y_lr = y_new
+        self.clases = pd.DataFrame({
+            "codigo": list(range(len(class_names_final))),
+            "nombre": class_names_final
+        })
+                        
 
-
-
+        # --- 4) Undersamplear la clase rest de ser necesario ---
         if self.undersample_rest and 0 in pick:
-            self._undersample_rest(X, y_lr, sub, trial, run) #Si queremos undersamplear la clase 0, lo hacemos después de fusionar, para que se ajuste a las clases fusionadas
+            if self.Debug:
+                print(f"✔ Datos antes del undersampling en 0: {np.sum(self.y==0)}")
+            self._undersample_rest(X, y_final, sub, trial, run) #Si queremos undersamplear la clase 0, lo hacemos después de fusionar, para que se ajuste a las clases fusionadas
+            if self.Debug:
+                print(f"Datos después de undersampling - 0: {np.sum(self.y==0)}")
         else: 
-            self._build(X, y_lr, sub, trial, run) #Ahora construimos los atributos principaples
+            self._build(X, y_final, sub, trial, run) #Ahora construimos los atributos principaples
+
+        
+
+
+    
+    def semantic_fusion(self, y): #Función bella toda bonita no la toquen
+        """
+        Fusiona clases usando las etiquetas originales.
+        Si fusionar=False, conserva nombres originales.
+        Si fusionar=True, fusiona pares imaginario/motor SOLO si ambos existen.
+        """
+
+        present = set(np.unique(y))
+
+        pair_map = {
+            (1, 5): "right",
+            (2, 6): "left",
+            (3, 7): "hands",
+            (4, 8): "feet",
+        }
+
+        label_to_name = {}
+
+        # Rest siempre igual
+        if 0 in present:
+            label_to_name[0] = "rest"
+
+        used = {0}
+
+        for pair, fused_name in pair_map.items():
+            a, b = pair
+
+            if a in present and b in present:
+                label_to_name[a] = fused_name
+                label_to_name[b] = fused_name
+                used.update([a, b])
+            else:
+                if a in present:
+                    label_to_name[a] = self.class_names_og[a]
+                    used.add(a)
+                if b in present:
+                    label_to_name[b] = self.class_names_og[b]
+                    used.add(b)
+
+        # Cualquier clase no contemplada queda con su nombre original
+        for cls in present:
+            if cls not in used:
+                label_to_name[cls] = self.class_names_og[cls]
+
+        # Crear nombres únicos en el orden de aparición por clase original
+        semantic_names = []
+        name_to_new = {}
+
+        for cls in sorted(present):
+            name = label_to_name[cls]
+            if name not in name_to_new:
+                name_to_new[name] = len(semantic_names)
+                semantic_names.append(name)
+
+        y_semantic = np.array([name_to_new[label_to_name[val]] for val in y], dtype=np.int32)
+
+        return y_semantic, semantic_names
+    
 
     def _undersample_rest(self, X, y, sub, trial, run): 
-        
-        pick = list(self.pick)
+    
         rest_label = 0
+
         idx_rest = np.where(y == rest_label)[0]
         idx_non_rest = np.where(y != rest_label)[0]
 
-        # conteos de las clases distintas de 0 (en el espacio original)
+        unique_classes = np.unique(y)
+
         counts_others = []
-        for cls in pick:
+        for cls in unique_classes:
             if cls == rest_label:
                 continue
             counts_others.append(np.sum(y == cls))
 
-        if counts_others:  # por si solo hay la clase 0
+        if counts_others:
             max_other = max(counts_others)
 
             if len(idx_rest) > max_other:
@@ -399,8 +438,9 @@ class Selection:
                 run = run[idx_keep]
 
                 print(f"Undersampling: clase 0 recortada de {len(idx_rest)} a {max_other} muestras.")
-            # si counts_others está vacío, significa que solo hay clase 0, no hacemos nada
-        self._build(X, y, sub, trial, run) #Ahora construimos los atributos principaples
+
+        self._build(X, y, sub, trial, run)
+
 
     def _build(self, X, y, sub, trial, run):
         self.X = X
@@ -410,41 +450,7 @@ class Selection:
         self.run = run
         
 
-        #Esto en teoría es sencillo, pero ahora, quiero hacer una tabla de clases únicamente porque sí, para esto necesitamos saber pick de nuevo 
-        if self.fusionar is False: 
-            self.clases = "Chingue a su madre" #Vamos a fusionar en todo momento, así que no nos importa esto
-            
-            
-        else:
-            """Ahora, tengamos en cuenta lo siguiente, si: 
-            pick = [0,3,4,7,8] Rest, Manos y pies 
-            pick = [0,1,2,5,6] Rest, Derecha e Izquierda
-            pick = [0,1,2,3,4,5,6,7,8] o None, Todas las clases 
-            """
-            unique_labels = sorted(np.unique(y).tolist())
-
-            if len(unique_labels) == 3:
-                # distinguir si son izquierda/derecha o manos/pies
-                pick_set = set(self.pick) if self.pick is not None else {0,1,2,3,4,5,6,7,8} #Ver la lista del pick namás
-
-                if pick_set == {0, 1, 2, 5, 6}:
-                    nombres = ["Rest", "Derecha", "Izquierda"]
-
-                elif pick_set == {0, 3, 4, 7, 8}:
-                    nombres = ["Rest", "Manos", "Pies"]
-
-                else:
-                    nombres = ["Rest", "Clase 1", "Clase 2"]
-
-            elif len(unique_labels) == 5:
-                nombres = ["Rest", "Derecha", "Izquierda", "Manos", "Pies"]
-            else: 
-                nombres = [f"Clase {lbl}" for lbl in unique_labels]
-
-            self.clases = pd.DataFrame({
-            "codigo": unique_labels,
-            "nombre": nombres
-            }, index=unique_labels)
+        
         
         self.n_classes = len(np.unique(y)) #Número total de clases totales
         self.class_counts = pd.Series(y).value_counts().sort_index() #Conteo de cada clase después del pick y la fusión
@@ -453,7 +459,8 @@ class Selection:
         self.input_shape = X.shape[1:]   #La forma de entrada para el modelo, que es el número de canales y muestras por ventana
         self.label_map = dict(zip(self.clases["codigo"], self.clases["nombre"])) #Un diccionario que mapea el código de clase al nombre de clase, útil para interpretación y visualización
     
-    
+
+            
     def resume_data(self):
         print(f"X shape: {self.X.shape}")
         print(f"y shape: {self.y.shape}")
@@ -500,18 +507,26 @@ def split_eeg(X, y, sub, trial, run, test_size=0.2, val_size=0.1, mode = None, d
     unique_subj = np.unique(sub)
 
     #Decidimos el modo de split
-    if mode is None and len(unique_subj) >= 10:
+    if mode is None and len(unique_subj) >= 10: #Modo default para datasets grandes, split por sujeto para evitar data leakage
         mode = "subject"
         group = sub
-    elif mode is None and len(unique_subj) < 10:
+    elif mode is None and len(unique_subj) < 10: #Modo default para datasets pequeños, split por trial para asegurar que haya suficientes sujetos en cada split
         mode = "trial"
+        if len(np.unique(trial)) < 3:
+            raise ValueError("No hay suficientes trials para hacer un split por trial. Considera usar otro modo de split o agregar más trials.")
         group = trial
 
     elif mode == "subject":
+        if len(unique_subj) < 2:
+            raise ValueError("No hay suficientes sujetos para hacer un split por sujeto. Considera usar otro modo de split o agregar más sujetos.")
         group = sub
     elif mode == "trial":
+        if len(np.unique(trial)) < 3:
+            raise ValueError("No hay suficientes trials para hacer un split por trial. Considera usar otro modo de split o agregar más trials.")
         group = trial
     elif mode == "run":
+        if len(np.unique(run)) < 3:
+            raise ValueError("No hay suficientes runs para hacer un split por run. Considera usar otro modo de split o agregar más runs.")
         group = run
     else: 
         raise ValueError(f"Modo de split desconocido: {mode}. Opciones válidas: 'subject', 'trial', 'run' o None (auto).")
