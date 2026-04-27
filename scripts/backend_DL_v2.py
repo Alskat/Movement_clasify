@@ -506,15 +506,20 @@ def split_eeg(X, y, sub, trial, run, test_size=0.2, val_size=0.1, mode = None, d
 
     unique_subj = np.unique(sub)
 
+    
     #Decidimos el modo de split
     if mode is None and len(unique_subj) >= 10: #Modo default para datasets grandes, split por sujeto para evitar data leakage
         mode = "subject"
         group = sub
+        if debug:
+            print("~~Modo de split por sujeto")
     elif mode is None and len(unique_subj) < 10: #Modo default para datasets pequeños, split por trial para asegurar que haya suficientes sujetos en cada split
         mode = "trial"
         if len(np.unique(trial)) < 3:
             raise ValueError("No hay suficientes trials para hacer un split por trial. Considera usar otro modo de split o agregar más trials.")
         group = trial
+        if debug: 
+            print("~~Modo de split por trial")
 
     elif mode == "subject":
         if len(unique_subj) < 2:
@@ -530,6 +535,10 @@ def split_eeg(X, y, sub, trial, run, test_size=0.2, val_size=0.1, mode = None, d
         group = run
     else: 
         raise ValueError(f"Modo de split desconocido: {mode}. Opciones válidas: 'subject', 'trial', 'run' o None (auto).")
+    if debug:
+            
+
+            print(f"Modo de split: {mode}")
 
 
 
@@ -537,7 +546,8 @@ def split_eeg(X, y, sub, trial, run, test_size=0.2, val_size=0.1, mode = None, d
     split = _split_by_group(
         X, y, sub, trial, run, group,
         test_size=test_size,
-        val_size=val_size
+        val_size=val_size,
+        debug=debug
     )
 
     # 🧠 INFO
@@ -566,6 +576,8 @@ def _split_by_group(X, y, sub, trial, run, group, test_size=0.2, val_size=0.1, r
 
     # 1. Grupos únicos
     unique_groups = np.unique(group)
+    if debug:
+        print(f"Unique groups: {unique_groups}")
 
     # 2. Split train vs temp
     train_groups, temp_groups = train_test_split(
@@ -580,6 +592,11 @@ def _split_by_group(X, y, sub, trial, run, group, test_size=0.2, val_size=0.1, r
         test_size=test_size / (test_size + val_size),
         random_state=random_state
     )
+
+    if debug:
+        print(f"Train groups: {train_groups}")
+        print(f"Val groups: {val_groups}")
+        print(f"Test groups: {test_groups}")    
 
     # 4. Máscaras
     mask_train = np.isin(group, train_groups)
@@ -659,8 +676,17 @@ def prepare_keras_split(split):
         ajustar_keras(split.X.test),
         split.y.train,
         split.y.val,
-        split.y.test
-    )    
+        split.y.test,
+        split.sub.train,
+        split.sub.val,
+        split.sub.test,
+        split.trial.train,
+        split.trial.val,
+        split.trial.test,
+        split.run.train,
+        split.run.val,
+        split.run.test
+    )  
 
 #4 Construir modelo EEGnet
 def build_eegnet(classes, chans, signal_len,
@@ -684,12 +710,16 @@ def build_eegnet(classes, chans, signal_len,
     )
     return model
 
-def eeg_train(X, y, sub, trial, run, test_size=0.2, classes=None, epochs=20, debug=False):
+def eeg_train(data_obj, mode= "subject", test_size=0.2, classes=None, epochs=20, debug=False):
+    
+    #0) Definir variables
+    X, y, sub, trial, run = data_obj.X, data_obj.y, data_obj.sub, data_obj.trial, data_obj.run
+
     if classes is None:
         classes = len(np.unique(y))
 
     #1 Split 
-    split, info = split_eeg(X, y, sub, trial, run, mode = "subject", test_size=test_size, debug=debug)
+    split, info = split_eeg(X, y, sub, trial, run, mode = mode, test_size=test_size, debug=debug)
 
     #2 Normalización: importante sólo se normaliza X
 
@@ -726,17 +756,16 @@ def eeg_train(X, y, sub, trial, run, test_size=0.2, classes=None, epochs=20, deb
     #6 Entrenar el modelo 
 
     if debug:
-        verbose = 2
-    else:
         verbose = 1
+    else:
+        verbose = 0
     #Entrenamiento 
     history = modelo.fit(
         keras_split.X.train, keras_split.y.train,
         epochs=epochs,
         batch_size=64,   
         validation_data=(keras_split.X.val, keras_split.y.val),
-        callbacks=callbacks,
-        verbose=verbose
+        callbacks=callbacks ,verbose=verbose
     )
 
     test_loss, test_acc = modelo.evaluate(keras_split.X.test, keras_split.y.test, verbose=0)
@@ -746,8 +775,10 @@ def eeg_train(X, y, sub, trial, run, test_size=0.2, classes=None, epochs=20, deb
 
     return modelo, history, channel_mean, channel_std, keras_split, info
 
-def eeg_fine(base, X, y, sub, trial, run, mean = None, std = None, epochs = 20, debug =False, test_size=0.2):
+def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =False, test_size=0.2):
 
+    #Paso 0: Definir variables
+    X, y, sub, trial, run = dataset_fine.X, dataset_fine.y, dataset_fine.sub, dataset_fine.trial, dataset_fine.run
     #Paso 1: split 
     if(len(np.unique(sub)) != 1):
         raise ValueError("El finetunning debe ser de un sólo sujeto WEON")
@@ -779,8 +810,8 @@ def eeg_fine(base, X, y, sub, trial, run, mean = None, std = None, epochs = 20, 
     model_ft = clone_model(base)
     model_ft.set_weights(base.get_weights())
 
-    for layer in model_ft.layers:
-        layer.trainable = True
+    for layer in model_ft.layers[:-2]:  # congelar todo menos últimas capas
+        layer.trainable = False
 
 
     #Paso 5: recompilar con LR más bajo para fine-tuning
@@ -810,18 +841,23 @@ def eeg_fine(base, X, y, sub, trial, run, mean = None, std = None, epochs = 20, 
         X_train_keras,
         split_fine.y.train,
         validation_data=(X_val_keras, split_fine.y.val),
-        callbacks=callbacks
+        callbacks=callbacks,
+        epochs=epochs
         )
 
     #Paso 8: evaluación en test del sujeto
     test_loss, test_acc = model_ft.evaluate(X_test_keras, split_fine.y.test, verbose=0)
     print(f"[Fine-tune] Test loss={test_loss:.4f}, acc={test_acc:.4f}")
 
-    # Opcional: devolver también los splits por si quieres calcular F1 afuera
-    X_list = [split_fine.X.train, split_fine.X.val, split_fine.X.test]
-    y_list = [split_fine.y.train, split_fine.y.val, split_fine.y.test]
+    keras_split_fine = DataSplit(
+        X_train_keras, X_val_keras, X_test_keras,
+        split_fine.y.train, split_fine.y.val, split_fine.y.test,
+        split_fine.sub.train, split_fine.sub.val, split_fine.sub.test,
+        split_fine.trial.train, split_fine.trial.val, split_fine.trial.test,
+        split_fine.run.train, split_fine.run.val, split_fine.run.test
+    )
 
-    return model_ft, history, mean, std, X_list, y_list
+    return model_ft, history, mean, std, keras_split_fine
 
 def undersample(X, y, sub, rest_label=0, random_state=42, debug=False):
     """
@@ -879,6 +915,34 @@ def undersample(X, y, sub, rest_label=0, random_state=42, debug=False):
 
     return X_new, y_new, sub_new
 
+def evaluate(modelo, keras_split, label_map=None, title="EEGNet"):
+    """
+    Evaluar directamente un modelo de manera más rápida
+    """
+
+    # 1. Datos
+    X_test = keras_split.X.test
+    y_test = keras_split.y.test
+
+    # 2. Predicción
+    y_prob = modelo.predict(X_test)
+
+    # 3. Nombres de clases
+    if label_map is not None:
+        class_names = [label_map[i] for i in sorted(label_map.keys())]
+    else:
+        n_classes = y_prob.shape[1]
+        class_names = [str(i) for i in range(n_classes)]
+
+    # 4. Evaluación completa
+    resultados = evaluar_modelo_multiclase(
+        y_true=y_test,
+        y_prob=y_prob,
+        class_names=class_names,
+        title_prefix=title
+    )
+
+    return resultados
 def evaluar_modelo_multiclase(y_true, y_prob, class_names=None, title_prefix="EEGNet"):
     """
     y_true : array (N,) con etiquetas enteras 0..C-1
@@ -1006,4 +1070,30 @@ def plot_history(history, metrics=("accuracy",), title_prefix="EEGNet"): #Lo má
         plt.legend()
         plt.tight_layout()
         plt.show()
+
+def save_model(model, mean, std, path = None, name_model = "model_EEGnet.keras", name_params = "params_EEGnet.npz"):
+    if path is None:
+        print("no se ha especificado el path, se guardará en el directorio actual")
+        path = os.getcwd()
+    if not os.path.exists(os.path.dirname(path)):
+        print(f"creando el directorio {os.path.dirname(path)}")
+        os.makedirs(os.path.dirname(path))
+    model.save(os.path.join(path, name_model))
+    np.savez(os.path.join(path, name_params), mean=mean, std=std)
+    
+def load_model(model_path = None, params_path = None):
+    from tensorflow.keras.models import load_model
+    if model_path is None: 
+        raise IndexError("No se ha especificado el path del modelo")
+        
+    if params_path is None:
+        raise IndexError("No se ha especificado el path de los parámetros de normalización")
+    
+
+    model = load_model(model_path)
+    params = np.load(params_path, allow_pickle=True)
+    mean = params["mean"]
+    std = params["std"]
+    return model, mean, std
+    
 

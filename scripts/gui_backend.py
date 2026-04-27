@@ -615,7 +615,7 @@ def stack_3d(X_list: List[np.ndarray],
     Devuelve:
         X_total: (N_total, C, T)
         y_total: (N_total,)
-    """
+"""
 
     if len(X_list) != len(y_list):
         raise ValueError("X_list y y_list deben tener el mismo largo")
