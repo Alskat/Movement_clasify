@@ -10,11 +10,12 @@ from typing import List
 from sklearn.preprocessing import StandardScaler
 import re #Para buscar el número final
 import glob #Para buscar archivos con tipos específicos
-
+import pandas as pd
+import matplotlib.pyplot as plt
 class EEGPreprocess: 
 
     def __init__(self, channels = None, l_freq = 8, h_freq = 30.0, use_notch = True, notch_freqs = (50,), window_size = 1.0, window_step = 0.5,
-                new_freq = None, tmin = 0.5, tmax =3.5, Debug = False):
+                new_freq = None, tmin = 0.5, tmax =3.5, Debug = False, path = None):
 
         #Parámetros de salida de nuestro array:
         self.X = None
@@ -30,7 +31,7 @@ class EEGPreprocess:
         self.l_freq = l_freq
         self.h_freq = h_freq
         self.use_notch = use_notch
-        
+        self.path = path
         self.new_freq = new_freq #Recordatorio: crear función de resampleo en caso de 
         self.tmin = tmin
         self.tmax = tmax
@@ -38,6 +39,8 @@ class EEGPreprocess:
         self.window_step = window_step
         self.Debug = Debug
         self.notch_freqs = notch_freqs
+
+        self.dropout_df = None
 
         #Metadaatos
 
@@ -48,23 +51,33 @@ class EEGPreprocess:
         self.n_samples = None
         self.name = None
 
-    def load(self, path: Union[str, Path], show_channels = False):
+    def load(self, path = None, show_channels = False, Debug = None):
 
-        self.data_dir = path
+        if Debug is None: 
+            Debug = self.Debug
 
-        subject_dirs = [os.path.join(path, d) for d in os.listdir(path)]
+        if self.path is None and path is not None:
+            self.path = path
+        elif self.path is not None and path is not None and self.path != path:
+            print(f"⚠️ Advertencia: Se proporcionó un nuevo path '{path}' pero ya existe un path en la instancia ('{self.path}'). Se usará el path de la instancia.")
+        elif self.path is not None and path is None:
+            pass #Usamos el path que ya está en la instancia
+        else:
+            raise ValueError("No se ha proporcionado un path para cargar los datos. Por favor, especifica un path válido.") 
+
+        subject_dirs = [os.path.join(self.path, d) for d in os.listdir(self.path)]
         subject_dirs = [d for d in subject_dirs if os.path.isdir(d)] #Creamos un array con todas las carpetas
 
 
         
-        if self.Debug:
+        if Debug:
             print(f"Total de directorios encontrados: {len(subject_dirs)}")
             print(subject_dirs)
          
         self.array = []
 
         for sujeto in subject_dirs: 
-            if self.Debug:
+            if Debug:
                 print(f"📂 Revisando directorio: {sujeto}")
             
             subject_name = os.path.basename(sujeto)   # e.g. "S001"
@@ -92,7 +105,7 @@ class EEGPreprocess:
                 6, 10, 14: movimiento imaginado ambos brazos o ambos pies
                 """
 
-                if self.Debug:
+                if Debug:
                     print(f"🔍 Procesando archivo: {ff}")
                     
                 
@@ -102,13 +115,13 @@ class EEGPreprocess:
 
                 n_1 = int(n_2.group(1)) #n muestra 
                 
-                if self.Debug:
+                if Debug:
                     print(f" Analizando evento: {n_1}")
 
                 if n_1 in {1, 2}:
                     
 
-                    if self.Debug:
+                    if Debug:
                         print(f" Evento {n_1}  ignorado.")
 
                     continue
@@ -118,7 +131,7 @@ class EEGPreprocess:
                     continue
 
                 #Si llegamos aquí, es porque el archivo es un .edf y corresponde a un evento que nos interesa
-                if self.Debug:
+                if Debug:
                     print(f"✅ Archivo {ff} válido para procesamiento.")
 
                     
@@ -131,7 +144,7 @@ class EEGPreprocess:
                 self.array.append(record_n) #Agregamos el diccionario a nuestro array de archivos válidos
             
 
-                if self.Debug:
+                if Debug:
                     print(f"Archivo {ff} agregado para procesamiento. Total archivos válidos hasta ahora: {len(self.array)}")
 
         if show_channels:
@@ -148,7 +161,12 @@ class EEGPreprocess:
 
         return self.array #Entregaremos para procesar una lista con todos los directorios y sus respectivos tipos de eventos y sujetos, para luego procesarlos en la función de procesamiento.
     
-    def build(self, array: List[dict]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
+    def build(self, array: List[dict], Debug = False, reasons_only = False,
+               show_dropouts = 0, dropout_rate = 150e-6, dropout = True,
+               save_df=True, channels = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
+        
+        if self.channels is None:
+            self.channels = channels 
         
 
         X_list = [] #Lista para guardar los datos de cada archivo
@@ -159,22 +177,36 @@ class EEGPreprocess:
 
         global_trial_offset = 0
 
+        if Debug:
+            print(f"📂 Procesando {len(array)} archivos...")
+
+        sub_counts_before = {}
+        sub_counts_after = {}
+
 
 
         #Bien, llegó la hora de llenar cada uno de estos arrays B) 
 
         print(f"Total de archivos a procesar: {len(array)} en {len(set([rec['subject'] for rec in array]))} sujetos")
+        if show_dropouts:
+            print(f"Dropout rate: {dropout_rate}")
+        if self.channels is not None:
+            print(f"Canales seleccionados: {self.channels}")
+        
 
-        for record in array:
+        for record in array: #Recorre 
             path = record["path"]
             event_id = record["event_id"]
             subject_id = record["subject"]
 
-            if self.Debug:
+            n_raw = subject_id + event_id
+
+            if Debug:
                 print(f"Procesando archivo: {path} | Evento: {event_id} | Sujeto: {subject_id}")
 
             
             #1) Cargar el archivo edf
+            
             raw = self._load_raw(path)
 
             #2) Obtener labels y demás metadatos
@@ -187,11 +219,38 @@ class EEGPreprocess:
 
             #4) Epocar el raw limpio con las etiquetas obtenidas
 
-            epochs = self._epochs(clean, labels, tmin=self.tmin, tmax=self.tmax) #Obtenemos las épocas con sus respectivas etiquetas, listas para ser windowizadas
+            epochs = self._epochs(clean, labels, tmin=self.tmin, tmax=self.tmax, debug=Debug, n_raw = n_raw) #Obtenemos las épocas con sus respectivas etiquetas, listas para ser windowizadas
 
-            #5) Eliminar épocas con artefactos
+            if dropout:
+                #5) Eliminar épocas con artefactos
+                n_before = len(epochs)
+                sub_counts_before[subject_id] = sub_counts_before.get(subject_id, 0) + n_before
 
-            epochs.drop_bad(reject=dict(eeg=150e-6), verbose = "Error")
+                epochs.drop_bad(reject=dict(eeg=dropout_rate), verbose = "Error")
+
+                n_after = len(epochs)
+                sub_counts_after[subject_id] = sub_counts_after.get(subject_id, 0) + n_after
+
+                n_dropped = n_before - n_after
+
+                if show_dropouts>1 and n_dropped > 0:
+                    
+                    ratio = n_dropped / n_before * 100
+                    print(f"⚠️ Dropout: {n_dropped}/{n_before} ({ratio:.1f}%) en {os.path.basename(path)}. De un total de {n_before} epocas.")
+                    
+                    reasons = {}
+                    drop_log = epochs.drop_log
+
+                    for log in drop_log:
+                        if len(log) == 0:
+                            continue
+                        key = tuple(log)
+                        reasons[key] = reasons.get(key, 0) + 1
+
+                    if reasons and reasons_only:
+                        print("🔍 Razones de eliminación:")
+                        for k, v in reasons.items():
+                            print(f"{k}: {v}")
 
 
             if len(epochs) == 0: 
@@ -200,7 +259,7 @@ class EEGPreprocess:
 
             #Habemus primeros datos para las listas!
 
-            X, y, trial = self._window(epochs, size=self.windows, step=self.window_step)
+            X, y, trial = self._window(epochs, size=self.windows, step=self.window_step, debug = Debug)
 
             #Faltan sub, run y trial
 
@@ -220,6 +279,88 @@ class EEGPreprocess:
         self.sub = np.concatenate(sub_list, axis=0)
         self.run = np.concatenate(run_list, axis=0)
         self.trial = np.concatenate(trial_list, axis=0)
+
+        
+
+        if show_dropouts > 0:
+    
+            print("\n📊 Dropout por sujeto:")
+
+            for sub_id in sub_counts_before.keys():
+                before = sub_counts_before.get(sub_id, 0)
+                after = sub_counts_after.get(sub_id, 0)
+
+                if before == 0:
+                    continue
+
+                dropped = before - after
+                ratio = dropped / before * 100
+
+                
+                if ratio > 90:
+                    print(f"Sujeto {sub_id:03d}: {before} → {after} | Dropout: {dropped} ({ratio:.1f}%)💀")
+                elif ratio > 50:
+                    print(f"Sujeto {sub_id:03d}: {before} → {after} | Dropout: {dropped} ({ratio:.1f}%)⚠️")
+                else: 
+                    print(f"Sujeto {sub_id:03d}: {before} → {after} | Dropout: {dropped} ({ratio:.1f}%)")
+        
+        #Ahora procedemos a guardar nuestra tabla en un formato pandas para, si queremos, guardarlo en un futuro 
+
+        if save_df: 
+            rows = []
+
+            for sub_id in sub_counts_before.keys():
+                before = sub_counts_before.get(sub_id, 0)
+                after = sub_counts_after.get(sub_id, 0)
+
+                if before == 0:
+                    continue
+
+                dropped = before - after
+                ratio = dropped / before * 100
+
+                rows.append({
+                    "subject": sub_id,
+                    "before_epochs": before,
+                    "after_epochs": after,
+                    "dropped_epochs": dropped,
+                    "dropout_%": ratio
+                })
+
+            df_dropout = pd.DataFrame(rows)
+            self.dropout_df = df_dropout
+            
+            if show_dropouts > 0:
+                print(f"\n📊 Tabla de Dropout ({dropout_rate}) por sujeto:")
+            
+                df_dropout.sort_values("dropout_%", ascending=False)
+
+                df_dropout["dropout_%"].describe()
+                df_dropout["dropout_%"].hist(bins=20)
+                plt.title("Distribución de Dropout por Sujeto")
+                plt.xlabel("Dropout (%)")
+                plt.ylabel("Cantidad de sujetos")
+                plt.show()
+
+            self.n_subjects = len(set([rec['subject'] for rec in array]))
+            self.dropout_name_str = str(dropout_rate)
+            name_channels = len(self.channels) if self.channels is not None else "all"
+
+            df_name = f"Movement_clasify/dropout_rate/{self.n_subjects}_subjects/{name_channels}_channels/dropout_{self.dropout_name_str}.csv"
+            actual_path = os.getcwd()
+            path_save = os.path.join(actual_path, df_name)
+
+            if not os.path.exists(os.path.dirname(path_save)):
+                os.makedirs(os.path.dirname(path_save))
+
+            df_dropout.to_csv(path_save, index=False)
+            print(f"Tabla guardada en {path_save}!")
+
+
+
+
+
+        
 
         #Ahora debemos transformar y a un formato numérico
 
@@ -254,6 +395,8 @@ class EEGPreprocess:
                 
             pick_avail = [ch for ch in self.channels if ch in raw.ch_names]
 
+            
+
             if not pick_avail:
                 raise ValueError(f"Ningún canal de {self.channels} está en los datos: {raw.ch_names}")
             #Ver si hay algún canal que no esté
@@ -262,6 +405,8 @@ class EEGPreprocess:
                 print(f"Advertencia: faltan canales {missing} en los datos.")
 
             raw.pick(pick_avail, verbose='ERROR')
+
+            
             #Si picks es None, entonces se cargan todos los canales disponibles
 
         return raw
@@ -338,6 +483,7 @@ class EEGPreprocess:
         start: float = 0.0,
         duration: float = 20.0,
         debug: bool = False,
+        n_raw = None,
         verbose: str = 'ERROR'
 
 ):
@@ -430,9 +576,10 @@ class EEGPreprocess:
         )
 
         if debug:
-            print(f"Épocas extraídas: {len(epochs)}")
-            print(f"Clases presentes: {present_labels}")
-            print(epochs)
+            print(f"Epocas obtenidas de {n_raw}: {len(epochs)}, clases: {epochs.event_id}")
+            #print(epochs)
+
+        #Todo esto se acá abajo son plots que creo que nunca usaré
 
         if scale == 'small':
             scaling = {'eeg': 100e-6}
@@ -457,7 +604,8 @@ class EEGPreprocess:
         self,
         epochs: mne.Epochs,
         size: float = 1.0,
-        step: float = 0.5
+        step: float = 0.5, 
+        debug = False
 
         
     ):
@@ -527,6 +675,9 @@ class EEGPreprocess:
         y_windows = np.array(y_windows)
         trial_local = np.array(trial_windows)
 
+        if debug: 
+            print(f"triales totales: {n_epochs}, ventanas totales: {len(y_windows)}")
+
         return X_windows, y_windows, trial_local
     
     def _stack_3d(self, X_list: List[np.ndarray],
@@ -558,15 +709,17 @@ class EEGPreprocess:
 
             # Validar dimensión
             if X.ndim != 3:
+
                 print(f"⚠️  Aviso: Se descarta X_list[{i}] con shape {X.shape} (no es 3D)")
                 continue
 
             # Validar canales/tiempos
             if X.shape[1:] != ref_shape:
-                print(
-                    f"⚠️  Aviso: Se descarta X_list[{i}] con shape {X.shape[1:]}, "
-                    f"se esperaba {ref_shape}"
-                )
+                if self.Debug:
+                    print(
+                        f"⚠️  Aviso: Se descarta X_list[{i}] con shape {X.shape[1:]}, "
+                        f"se esperaba {ref_shape}"
+                    )
                 continue
 
             # Si pasó la validación, se agrega
