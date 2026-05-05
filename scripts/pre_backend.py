@@ -266,6 +266,8 @@ class EEGPreprocess:
             sub = np.full(len(y), subject_id)
             run = np.full(len(y), event_id)
 
+            assert len(X) == len(y) == len(sub) == len(run) == len(trial), "Inconsistencia en la longitud de los arrays generados!"
+
             trial_file = trial + global_trial_offset
             global_trial_offset += max(trial) + 1
 
@@ -275,11 +277,11 @@ class EEGPreprocess:
             run_list.append(run)
             trial_list.append(trial_file)
 
-        self.X, self.y = self._stack_3d(X_list, y_list)
-        self.sub = np.concatenate(sub_list, axis=0)
-        self.run = np.concatenate(run_list, axis=0)
-        self.trial = np.concatenate(trial_list, axis=0)
+            assert len(X_list) == len(y_list) == len(sub_list) == len(run_list) == len(trial_list), "Inconsistencia en la longitud de las listas acumuladoras!"
 
+        self.X, self.y, self.sub, self.run, self.trial = self._stack(X_list, y_list, sub_list, run_list, trial_list)
+
+        assert len(self.X) == len(self.y) == len(self.sub) == len(self.run) == len(self.trial), "Inconsistencia en la longitud de los arrays finales después del stack!"
         
 
         if show_dropouts > 0:
@@ -465,7 +467,7 @@ class EEGPreprocess:
                 self.sfreq = self.new_freq
             else: 
                 print(f"La frecuencia de muestreo ya es {self.sfreq} Hz, no se realizará resampleo.")
-
+        self.samples = int(round(self.windows * self.sfreq))
 
         elapsed_ms = (perf_counter() - t0) * 1000.0
         return raw_clean, elapsed_ms
@@ -676,12 +678,17 @@ class EEGPreprocess:
         trial_local = np.array(trial_windows)
 
         if debug: 
-            print(f"triales totales: {n_epochs}, ventanas totales: {len(y_windows)}")
+            print(f"Archivo con {n_epochs} épocas → {len(X_windows)} ventanas (size={size}s, step={step}s)")
+        
+
+        if len(X_windows) != len(y_windows) != len(trial_local):
+            raise ValueError(f"Inconsistencia en número de ventanas: {len(X_windows)} vs {len(y_windows)} vs {len(trial_local)} ERROR EN _WINDOWS")
+        
 
         return X_windows, y_windows, trial_local
     
-    def _stack_3d(self, X_list: List[np.ndarray],
-                y_list: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]: #Apilar para DL
+    def _stack(self, X_list: List[np.ndarray],
+                y_list: List[np.ndarray], sub_list: List[np.ndarray], run_list: List[np.ndarray], trial_list: List[np.ndarray]):
         """
         Apila tensores 3D ignorando entradas inválidas.
         
@@ -693,48 +700,42 @@ class EEGPreprocess:
             y_total: (N_total,)
         """
 
-        if len(X_list) != len(y_list):
-            raise ValueError("X_list y y_list deben tener el mismo largo")
+        X_ok = []
+        y_ok = []
+        sub_ok = []
+        run_ok = []
+        trial_ok = []
 
-        if len(X_list) == 0:
-            raise ValueError("X_list está vacío")
-
-        # shape de referencia
+        
         ref_shape = X_list[0].shape[1:]  # (C, T)
 
-        X_clean = []
-        y_clean = []
+        
 
-        for i, (X, y) in enumerate(zip(X_list, y_list)):
+        for i in range(len(X_list)):
+            X = X_list[i]
 
-            # Validar dimensión
-            if X.ndim != 3:
-
-                print(f"⚠️  Aviso: Se descarta X_list[{i}] con shape {X.shape} (no es 3D)")
-                continue
-
-            # Validar canales/tiempos
             if X.shape[1:] != ref_shape:
-                if self.Debug:
-                    print(
-                        f"⚠️  Aviso: Se descarta X_list[{i}] con shape {X.shape[1:]}, "
-                        f"se esperaba {ref_shape}"
-                    )
+                if self.Debug:  
+                    f"⚠️  Aviso: Se descarta X_list[{i}] con shape {X.shape[1:]}, "
+                    f"se esperaba {ref_shape}"
+
+                
                 continue
 
-            # Si pasó la validación, se agrega
-            X_clean.append(X)
-            y_clean.append(y)
+            X_ok.append(X)
+            y_ok.append(y_list[i])
+            sub_ok.append(sub_list[i])
+            run_ok.append(run_list[i])
+            trial_ok.append(trial_list[i])
 
-        if len(X_clean) == 0:
-            raise RuntimeError("❌ Ningún archivo válido quedó después del filtrado.")
+        X = np.concatenate(X_ok, axis=0)
+        y = np.concatenate(y_ok, axis=0)
+        sub = np.concatenate(sub_ok, axis=0)
+        run = np.concatenate(run_ok, axis=0)
+        trial = np.concatenate(trial_ok, axis=0)
 
-        # Apilar
-        X_total = np.concatenate(X_clean, axis=0)
-        y_total = np.concatenate(y_clean, axis=0)
+        return X, y, sub, run, trial
 
-        print(f"✔️ stack_3d: Datos válidos: {X_total.shape[0]} ventanas.")
-        return X_total, y_total
 
     def _idx(self, y: np.ndarray) -> None: #Transformar etiquetas a formato numérico
 
@@ -773,6 +774,9 @@ class EEGPreprocess:
         print("\n📐 Dimensiones:")
         print(f"X shape: {self.X.shape}")
         print(f"y shape: {self.y.shape}")
+        print(f"sub shape: {self.sub.shape}")
+        print(f"trial shape: {self.trial.shape}")
+        print(f"run shape: {self.run.shape}")
         print(f"Total muestras (ventanas): {self.X.shape[0]}")
         print(f"Canales: {self.X.shape[1]}")
         print(f"Muestras por ventana: {self.X.shape[2]}")
@@ -849,4 +853,4 @@ class EEGPreprocess:
 
         print(f"✔️ Dataset {name} guardado en: {path}!")
 
-            
+    

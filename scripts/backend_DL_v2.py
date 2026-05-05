@@ -178,6 +178,9 @@ class Selection:
         print("\n📐 Dimensiones:")
         print(f"X shape: {self.X.shape}")
         print(f"y shape: {self.y.shape}")
+        print(f"sub shape: {self.sub.shape}")
+        print(f"trial shape: {self.trial.shape}")
+        print(f"run shape: {self.run.shape}")
         print(f"Total muestras (ventanas): {self.X.shape[0]}")
         print(f"Canales: {self.X.shape[1]}")
         print(f"Muestras por ventana: {self.X.shape[2]}")
@@ -249,7 +252,7 @@ class Selection:
             print(f"✔ Canales seleccionados: {self.channels_names}")
             print(f"Nuevo shape X: {self.X.shape}")
             
-    def pipeline(self, n=None):
+    def pipeline(self, n=None, undersample_rest=None, binary = False):
         #El pipeline principal consiste en aplicar un pick y luego una fusión, cosas que ya tenemos en otras clases 
         #n sólo es para limitar la cantidad de datos totales, no recuerdo porque lo quise añadir pero ahí está
     
@@ -260,18 +263,12 @@ class Selection:
         trial = self.trial
         run = self.run
 
-        if len(sub) != len(y): #En caso de que tengan diferentes longitudes 
-            #Cortamos para que sean iguales
-
+        if undersample_rest is not None:
+            self.undersample_rest = undersample_rest
             if self.Debug:
-                print("⚠️ Advertencia: sub y y tienen diferentes longitudes. Se cortarán al mínimo común.")
-                print(f"Longitud original - sub: {len(sub)}, y: {len(y)}")
-            min_len = min(len(sub), len(y))
-            X = X[:min_len]
-            y = y[:min_len]
-            sub = sub[:min_len]
-            trial = trial[:min_len]
-            run = run[:min_len]
+                print(f"No se va a aplicar undersample!")
+
+    
 
         # --- 1) Elegir clases a conservar ---
         if self.pick is not None:
@@ -304,6 +301,33 @@ class Selection:
             trial = trial[:n]
             run = run[:n]
             print(f"Seleccionando los primeros {n} de {total} datos tras el filtrado.")
+
+        # --- 2.5) En caso de querer hacer clases binarias
+
+        if binary:
+            if self.Debug:
+                print("✔ Activando modo binario (rest vs no_rest)")
+
+            # 0 = rest, todo lo demás = 1
+            y_final = np.where(y == 0, 0, 1).astype(np.int32)
+
+            class_names_final = ["rest", "no_rest"]
+
+            self.clases = pd.DataFrame({
+                "codigo": [0, 1],
+                "nombre": class_names_final
+            })
+
+            if self.Debug:
+                print(dict(zip(*np.unique(y_final, return_counts=True))))
+
+            # aplicar undersampling si corresponde
+            if self.undersample_rest:
+                self._undersample_rest(X, y_final, sub, trial, run)
+            else:
+                self._build(X, y_final, sub, trial, run)
+
+            return  
 
         # --- 3) fusionar clases y remapear las etiquetas--- 
 
@@ -565,9 +589,20 @@ def split_eeg(X, y, sub, trial, run, test_size=0.2, val_size=0.1, mode = None, d
         print("X_val:", split.X.val.shape)
         print("X_test:", split.X.test.shape)
 
+    clases_train = set(np.unique(split.y.train))
+    clases_total = set(np.unique(y))
+    clases_faltantes = clases_total - clases_train
+    if clases_faltantes:
+        import warnings
+        warnings.warn(
+            f"⚠️ Clases {clases_faltantes} no están en el train set. "
+            f"Considera cambiar el random_state o el modo de split."
+        )
+    
+
     return split, split_info
 
-def _split_by_group(X, y, sub, trial, run, group, test_size=0.2, val_size=0.1, random_state=42, debug=False): #Para qué nos vamos a mentir, yo hice el código pero Claude lo optimizó
+def _split_by_group(X, y, sub, trial, run, group, test_size=0.1, val_size=0.1, random_state=42, debug=False): #Para qué nos vamos a mentir, yo hice el código pero Claude lo optimizó
 
     # Validación
     assert len(X) == len(y) == len(group), "X, y y group deben tener mismo largo"
@@ -576,8 +611,7 @@ def _split_by_group(X, y, sub, trial, run, group, test_size=0.2, val_size=0.1, r
 
     # 1. Grupos únicos
     unique_groups = np.unique(group)
-    if debug:
-        print(f"Unique groups: {unique_groups}")
+    
 
     # 2. Split train vs temp
     train_groups, temp_groups = train_test_split(
@@ -593,10 +627,7 @@ def _split_by_group(X, y, sub, trial, run, group, test_size=0.2, val_size=0.1, r
         random_state=random_state
     )
 
-    if debug:
-        print(f"Train groups: {train_groups}")
-        print(f"Val groups: {val_groups}")
-        print(f"Test groups: {test_groups}")    
+ 
 
     # 4. Máscaras
     mask_train = np.isin(group, train_groups)
@@ -691,7 +722,7 @@ def prepare_keras_split(split):
 #4 Construir modelo EEGnet
 def build_eegnet(classes, chans, signal_len,
                  dropout_rate=0.5, kern_length=64,
-                 F1=16, D=2, norm_rate=0.25,
+                 F1=8, D=2, norm_rate=0.25,
                  dropout_type='Dropout'):
     
     #En esta construimos nuestro modelo EEGnet
@@ -710,7 +741,8 @@ def build_eegnet(classes, chans, signal_len,
     )
     return model
 
-def eeg_train(data_obj, mode= "subject", test_size=0.2, classes=None, epochs=20, debug=False):
+def eeg_train(data_obj, mode="subject", test_size=0.1, classes=None, epochs=20, 
+              debug=False, use_class_weight=True, sfreq=160):
     
     #0) Definir variables
     X, y, sub, trial, run = data_obj.X, data_obj.y, data_obj.sub, data_obj.trial, data_obj.run
@@ -736,7 +768,8 @@ def eeg_train(data_obj, mode= "subject", test_size=0.2, classes=None, epochs=20,
     chans = keras_split.X.train.shape[1]
     signal_len = keras_split.X.train.shape[2]
 
-    modelo = build_eegnet(classes, chans, signal_len)
+    kern_length = int(sfreq // 2)   
+    modelo = build_eegnet(classes, chans, signal_len, kern_length=kern_length)
 
     #5) Compilar el modelo
     modelo.compile(
@@ -759,13 +792,33 @@ def eeg_train(data_obj, mode= "subject", test_size=0.2, classes=None, epochs=20,
         verbose = 1
     else:
         verbose = 0
-    #Entrenamiento 
+    class_weight = None
+    if use_class_weight:
+        from sklearn.utils.class_weight import compute_class_weight
+        classes_present = np.unique(keras_split.y.train)
+        weights = compute_class_weight('balanced',
+                                       classes=classes_present,
+                                       y=keras_split.y.train)
+        class_weight = dict(zip(classes_present, weights))
+        
+    """if debug:
+        print("Nombres de los hiperparámetros:")
+        print(f"Learning rate: {K.get_value(modelo.optimizer.lr)}")
+        print(f"Kernel length: {kern_length}")
+        print(f"mean: {channel_mean} y std: {channel_std}")
+        print(f"Class weights: {class_weight}")
+        print(f"signal_len: {signal_len}")
+        print(f"chans: {chans}")
+        print(f"")"""
+
     history = modelo.fit(
         keras_split.X.train, keras_split.y.train,
         epochs=epochs,
-        batch_size=64,   
+        batch_size=32,          # ✅ bajar de 64 a 32
         validation_data=(keras_split.X.val, keras_split.y.val),
-        callbacks=callbacks ,verbose=verbose
+        callbacks=callbacks,
+        class_weight=class_weight,  # ✅ añadir
+        verbose=verbose
     )
 
     test_loss, test_acc = modelo.evaluate(keras_split.X.test, keras_split.y.test, verbose=0)
@@ -775,7 +828,8 @@ def eeg_train(data_obj, mode= "subject", test_size=0.2, classes=None, epochs=20,
 
     return modelo, history, channel_mean, channel_std, keras_split, info
 
-def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =False, test_size=0.2):
+def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =False, test_size=0.2,
+              unfreeze_last_n=16, lr=5e-4, use_class_weight=True, batch_size=32):
 
     #Paso 0: Definir variables
     X, y, sub, trial, run = dataset_fine.X, dataset_fine.y, dataset_fine.sub, dataset_fine.trial, dataset_fine.run
@@ -791,8 +845,8 @@ def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =Fa
 
     #Paso 2: Normalización con media y desviación dada (si no se da, se calcula con el mismo método que antes)
 
-    if mean is None or std is None:
-        mean, std = calc_stats(split_fine.X.train)
+    #if mean is None or std is None:
+    mean, std = calc_stats(split_fine.X.train)
 
     X_train_norm = normalizar_por_canal(split_fine.X.train, mean, std)
     X_val_norm = normalizar_por_canal(split_fine.X.val, mean, std)
@@ -810,17 +864,39 @@ def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =Fa
     model_ft = clone_model(base)
     model_ft.set_weights(base.get_weights())
 
-    for layer in model_ft.layers[:-2]:  # congelar todo menos últimas capas
-        layer.trainable = False
+    if  unfreeze_last_n is None or unfreeze_last_n > len(model_ft.layers): 
+        for layer in model_ft.layers:
+            layer.trainable = True
+    else:
+        for layer in model_ft.layers:
+            layer.trainable = False
+        for layer in model_ft.layers[-unfreeze_last_n:]:
+            layer.trainable = True
 
 
     #Paso 5: recompilar con LR más bajo para fine-tuning
 
     model_ft.compile(
         loss='sparse_categorical_crossentropy',
-        optimizer=Adam(learning_rate=5e-5),
+        optimizer=Adam(learning_rate=lr),
         metrics=['accuracy']
     )
+
+    class_weight = None
+    if use_class_weight:
+        from sklearn.utils.class_weight import compute_class_weight
+        classes_present = np.unique(split_fine.y.train)
+        weights = compute_class_weight('balanced', 
+                                        classes=classes_present, 
+                                        y=split_fine.y.train)
+        class_weight = dict(zip(classes_present, weights))
+        if debug:
+            print("Class weights:", class_weight)
+
+    if debug:
+        verbose = 1
+    else:
+        verbose = 0
 
     #Paso 6: callbacks específicos para fine-tuning
     callbacks = [
@@ -838,12 +914,14 @@ def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =Fa
 
     #Paso 7: entrenamiento de fine-tuning
     history = model_ft.fit(
-        X_train_keras,
-        split_fine.y.train,
+        X_train_keras, split_fine.y.train,
         validation_data=(X_val_keras, split_fine.y.val),
         callbacks=callbacks,
-        epochs=epochs
-        )
+        epochs=epochs,
+        batch_size=batch_size,          
+        class_weight=class_weight,
+        verbose=verbose
+    )
 
     #Paso 8: evaluación en test del sujeto
     test_loss, test_acc = model_ft.evaluate(X_test_keras, split_fine.y.test, verbose=0)
