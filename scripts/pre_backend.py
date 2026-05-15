@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 class EEGPreprocess: 
 
     def __init__(self, channels = None, l_freq = 8, h_freq = 30.0, use_notch = True, notch_freqs = (50,), window_size = 1.0, window_step = 0.5,
-                new_freq = None, tmin = 0.5, tmax =3.5, Debug = False, path = None):
+                new_freq = None, tmin = 0.5, tmax =3.5, Debug = False, path = None, config = None):
 
         #Parámetros de salida de nuestro array:
         self.X = None
@@ -51,6 +51,113 @@ class EEGPreprocess:
         self.n_samples = None
         self.name = None
 
+        #Validación de la configuración de eventos
+
+        self.config = config
+        self.allowed_classes = {"rest", "left_i", "right_i", "hands_i", "feet_i", "left_m", "right_m", "hands_m", "feet_m"}
+        if not isinstance(self.config, dict):
+            raise TypeError(
+                "La configuración debe ser un diccionario."
+            )
+        
+        self.event_lookup = {}
+        self.available_events = set()
+
+        for run_group, cfg in self.config.items():
+
+            #run_group es la id de los runs (El número final del nombre del archivo, que corresponde al tipo de evento) 
+            #cfg es la configuración de cada run, que debe contener un diccionario con "events" y "mode"
+
+            if self.Debug:
+                print(f"Validando configuración para run_group: {run_group}")
+                print(f"Configuración encontrada: {cfg}")
+
+            if not isinstance(cfg, dict):
+
+                raise TypeError(
+                    f"Config inválida en {run_group}"
+                )
+
+            if "events" not in cfg:
+
+                raise ValueError(
+                    f"Falta 'events' en {run_group}"
+                )
+
+            if "mode" not in cfg:
+
+                raise ValueError(
+                    f"Falta 'mode' en {run_group}"
+                )
+
+            event_map = cfg["events"]
+
+            if self.Debug:
+                print(f"Validando 'events' en {run_group}: {event_map}")
+
+            if not isinstance(event_map, dict):
+
+                raise TypeError(
+                    f"'events' debe ser dict en {run_group}"
+                )
+
+            # ---------------------------------------------
+            # Validar labels
+            # ---------------------------------------------
+
+            for ann_name, label in event_map.items():
+                #ann_name es la anotación del evento (T0, T1, T2) y label es la clase que corresponde a esa anotación (rest, left_i, right_i, etc.)
+
+                if self.Debug:
+                    print(f"Validando anotación '{ann_name}' con label '{label}' en {run_group}")
+
+                # Validar anotación
+
+                if not isinstance(ann_name, str):
+
+                    raise TypeError(
+                        f"Evento inválido: {ann_name}"
+                    )
+
+                if not re.match(r"^T\d+$", ann_name):
+
+                    raise ValueError(
+                        f"Formato inválido de anotación: {ann_name}"
+                    )
+
+                # Validar label
+
+                if label not in self.allowed_classes:
+
+                    raise ValueError(
+                        f"Clase no permitida: {label}"
+                    )
+
+            # ---------------------------------------------
+            # Construir lookup rápido
+            # ---------------------------------------------
+
+            for run_id in run_group:
+
+                if run_id in self.event_lookup:
+
+                    raise ValueError(
+                        f"Run duplicado: {run_id}"
+                    )
+
+                self.event_lookup[run_id] = cfg
+                self.available_events.add(run_id)
+
+                #self.event_lookup[n] va a tener la configuración de cada evento, es decir, un diccionario con "events" y "mode", que a su vez "events" es un diccionario con la anotación (T0, T1, T2) y su respectiva clase (rest, left_i, etc.)
+                #self.available_events es un set con todos los eventos disponibles, es decir, los números finales de los archivos que corresponden a eventos que sí vamos a procesar (3,4,5,6,7,8,9,10,11,12,13,14)
+                #por ejemplo self.event_lookup[3] va a tener la configuración de los eventos con terminación 3, que corresponde a movimiento real mano izquierda o derecha, es decir, un diccionario con "events" y "mode", donde "events" es un diccionario con la anotación (T0, T1, T2) y su respectiva clase (rest, left_m, right_m) y "mode" es "LR_M"
+
+        if self.Debug:
+            print(f"Configuración de eventos validada.")
+
+            print(f"event_lookup: {self.event_lookup}")
+            print(f"available_events: {self.available_events}")
+
     def load(self, path = None, show_channels = False, Debug = None):
 
         if Debug is None: 
@@ -67,6 +174,8 @@ class EEGPreprocess:
 
         subject_dirs = [os.path.join(self.path, d) for d in os.listdir(self.path)]
         subject_dirs = [d for d in subject_dirs if os.path.isdir(d)] #Creamos un array con todas las carpetas
+
+        unknown_events = set()
 
 
         
@@ -115,14 +224,15 @@ class EEGPreprocess:
 
                 n_1 = int(n_2.group(1)) #n muestra 
                 
-                if Debug:
-                    print(f" Analizando evento: {n_1}")
 
-                if n_1 in {1, 2}:
-                    
+                if n_1 not in self.available_events:
 
                     if Debug:
-                        print(f" Evento {n_1}  ignorado.")
+                        print(
+                            f"⚠️ Evento {n_1} ignorado "
+                            f"(no definido en dataset_config)"
+                        )
+                    unknown_events.add(n_1)
 
                     continue
                     
@@ -132,7 +242,7 @@ class EEGPreprocess:
 
                 #Si llegamos aquí, es porque el archivo es un .edf y corresponde a un evento que nos interesa
                 if Debug:
-                    print(f"✅ Archivo {ff} válido para procesamiento.")
+                    print(f"✅ Archivo {n_1} válido para procesamiento.")
 
                     
                 record_n = {
@@ -155,6 +265,12 @@ class EEGPreprocess:
                 print(raw.ch_names)
             else:
                 print("No se encontraron archivos válidos para mostrar canales.")
+        if unknown_events:
+
+            print(
+                f"⚠️ Eventos ignorados no definidos "
+                f"en config: {sorted(unknown_events)}"
+            )
 
 
 
@@ -211,7 +327,7 @@ class EEGPreprocess:
 
             #2) Obtener labels y demás metadatos
 
-            labels, mode = self._get_labels(event_id) #Genial! ya tenemos etiquetas y el raw! vamos con lo siguiente:}
+            labels, mode, event_map = self._get_labels(event_id, Debug = Debug) #Genial! ya tenemos etiquetas y el raw! vamos con lo siguiente:}
 
             #3) Preprocesar el raw 
 
@@ -219,7 +335,7 @@ class EEGPreprocess:
 
             #4) Epocar el raw limpio con las etiquetas obtenidas
 
-            epochs = self._epochs(clean, labels, tmin=self.tmin, tmax=self.tmax, debug=Debug, n_raw = n_raw) #Obtenemos las épocas con sus respectivas etiquetas, listas para ser windowizadas
+            epochs = self._epochs(clean, event_map = event_map, tmin=self.tmin, tmax=self.tmax, debug=Debug, n_raw = n_raw) #Obtenemos las épocas con sus respectivas etiquetas, listas para ser windowizadas
 
             if dropout:
                 #5) Eliminar épocas con artefactos
@@ -413,28 +529,37 @@ class EEGPreprocess:
 
         return raw
     
-    def _get_labels(self,  event_id: int) -> mne.io.Raw:
+    def _get_labels(self, event_id: int, Debug = False):
 
-        if self.Debug:
-            print(f" Evento ID: {event_id}, Sujeto ID: {event_id}")
+        #Primero verificamos que el evento exista
 
-        if event_id in {3,7,11}:
-            labels =  ['rest','left_m','right_m']
-            mode = "LR_M"
+        if event_id not in self.event_lookup:
 
-        if event_id in {4,8,12}:
-            labels = ['rest', 'left_i', 'right_i']
-            mode = "LR_I"
+            raise ValueError(
+                f"Evento {event_id} no definido "
+                f"en dataset_config."
+            )
 
-        if event_id in {6,10,14}:
-            labels= ['rest', 'hands_i', 'feet_i']
-            mode = "HF_I"
+        #Obtenemos configuración, cfg es un diccionario
 
-        if event_id in {5,9,13}:
-            labels =  ['rest', 'hands_m', 'feet_m']
-            mode = "HF_M"
+        cfg = self.event_lookup[event_id]
 
-        return labels, mode
+        mode = cfg["mode"]
+
+        event_map = cfg["events"]
+
+        #Obtenemos etiquetas
+
+        labels = list(dict.fromkeys(event_map.values()))
+
+        # ==========================================
+        # Debug
+        # ==========================================
+
+        if Debug:
+            print(f"Evento {event_id} → Modo: {mode}, Etiquetas: {labels}, Mapeo: {event_map}")
+
+        return labels, mode, event_map
     
     def _preprocess( #Preprocesamiento: filtrado, notch y CAR
         self,
@@ -472,134 +597,176 @@ class EEGPreprocess:
         elapsed_ms = (perf_counter() - t0) * 1000.0
         return raw_clean, elapsed_ms
     
-    def _epochs( #Epocar
-        
+    def _epochs(
+
         self,
         raw_clean: mne.io.BaseRaw,
-        wanted_labels: List[str],
-        tmin: float = -0.5,
-        tmax: float = 2.5,
+        event_map: dict,
+        tmin: float = 0.5,
+        tmax: float = 3.5,
         preload: bool = True,
-        scale: str = 'Medium', # 'Small', 'Medium', 'Large', #Esto es sólo para ver la señal. no recomendable en backend!
-        show: bool = False,
-        start: float = 0.0,
-        duration: float = 20.0,
         debug: bool = False,
         n_raw = None,
-        verbose: str = 'ERROR'
+        verbose: str = "ERROR"
 
-):
-    
-        # 1) Eventos y diccionario de anotaciones
-        events, ann_dict = mne.events_from_annotations(raw_clean, verbose='ERROR') #Events nos entrega los tiempos y ann el diccionario
-        inv_ann = {v: k for k, v in ann_dict.items()}  
+    ):
 
-        label2code = {lab: idx for idx, lab in enumerate(wanted_labels)}
+        #Leer los eventos del edf y mapearlos a nuestras etiquetas internas
 
-        # ──────────────────────────────────────────────
-        # 3) Función para convertir el código T0/T1/T2 a nuestras clases
-        def map_event(code_int):
-            """
-            Convierte el entero del evento (ej. 2, 3, etc.)
-            al código interno de nuestras clases (0,1,2,...)
-            """
-            # Recuperar nombre textual: "T0", "T1", "T2"
+        events, ann_dict = mne.events_from_annotations(
+            raw_clean,
+            verbose="ERROR"
+        )
+
+        inv_ann = {v: k for k, v in ann_dict.items()}
+
+        #Pbtenemos las clases en orden
+
+        wanted_labels = list(
+            dict.fromkeys(event_map.values())
+        )
+
+        label2code = {
+            lab: idx
+            for idx, lab in enumerate(wanted_labels)
+        }
+
+        #Mapear eventos
+
+        mapped = []
+
+        detected_annotations = set()
+
+        for sample, _, code_int in events:
+
             name = inv_ann.get(code_int, None)
+
             if name is None:
-                return None  # evento desconocido
+                continue
 
             name = name.strip().upper()
 
-            if name == "T0" and "rest" in label2code:
-                return label2code["rest"]
+            detected_annotations.add(name)
 
-            if name == "T1":
-                # Si usuario pidió left
-                if "left_i" in label2code:
-                    return label2code["left_i"]
-                # Si usuario pidió hands
-                if "hands_i" in label2code:
-                    return label2code["hands_i"]
-                            
-                if "left_m" in label2code:
-                    return label2code["left_m"]
-                # Si usuario pidió hands
-                if "hands_m" in label2code:
-                    return label2code["hands_m"]
+            
 
-            if name == "T2":
-                # Si usuario pidió right
-                if "right_i" in label2code:
-                    return label2code["right_i"]
-                # Si usuario pidió feet
-                if "feet_i" in label2code:
-                    return label2code["feet_i"]
-                    
-                if "right_m" in label2code:
-                    return label2code["right_m"]
-                # Si usuario pidió feet
-                if "feet_m" in label2code:
-                    return label2code["feet_m"]
+            if name not in event_map: #Si el evento no se encuentra en el diccionario
 
-            return None
-    
+                raise ValueError(
+                    f"""
+                        Evento inesperado detectado en EDF.
 
+                        Evento encontrado:
+                        {name}
 
-        #Mapear eventos
-        mapped = []
-        for sample, _, code_int in events:
-            tgt = map_event(code_int)
-            if tgt is not None:
-                mapped.append([sample, 0, tgt])
+                        Eventos esperados:
+                        {list(event_map.keys())}
+                        """
+                                    )
 
+            #Asignar los labels correspondientes a cada evento
 
-        
-        #print("Ejemplo de eventos mapeados:", mapped[:10])
+            label = event_map[name]
 
+            tgt = label2code[label]
 
-        # Extraer épocas 
+            mapped.append([sample, 0, tgt])
+
+        #Eventos faltantes
+
+        missing = set(event_map.keys()) - detected_annotations
+
+        if missing:
+
+            print(
+                f"⚠️ Eventos configurados "
+                f"pero no encontrados: {missing}"
+            )
+
+        #Buscar si hay eventos faltantes
+
+        if len(mapped) == 0:
+
+            raise ValueError(
+                "No se encontraron eventos válidos."
+            )
+
+        #Convertir a numpy array
+
         mapped = np.array(mapped, dtype=int)
 
-        # Filtrar solo las clases presentes
-        present_codes = np.unique(mapped[:, 2])
-        present_labels = [lab for lab, code in label2code.items() if code in present_codes]
-        event_id = {lab: label2code[lab] for lab in present_labels}
-
-        # Crear épocas
+        #Crear épocas con los eventos mapeados
         epochs = mne.Epochs(
-            raw=raw_clean, 
+
+            raw=raw_clean,
+
             events=mapped,
-            event_id=event_id,
-            tmin=tmin, 
-            tmax=tmax,
-            baseline=(None, 0.5),  # baseline hasta evento, más estándar
-            preload=preload, 
+
+            event_id=label2code,
+
+            tmin=0,
+
+            tmax=max(tmax, self.windows),
+
+            baseline=None,
+
+            preload=preload,
+
             verbose=verbose
         )
 
+        #Recortamos las épocas al rango deseado (tmin, tmax)
+
+        epochs.crop(
+            tmin=tmin,
+            tmax=tmax
+        )
+
+        #Comprobar que las clases sean las esperadas
+
+        present_codes = np.unique(epochs.events[:, 2])
+
+        present_labels = {
+
+            lab
+            for lab, code in label2code.items()
+            if code in present_codes
+        }
+
+        expected_labels = set(wanted_labels)
+
+        if present_labels != expected_labels:
+
+            raise ValueError(
+                f"""
+                Mismatch de clases detectado.
+
+                Clases esperadas:
+                {expected_labels}
+
+                Clases detectadas:
+                {present_labels}
+                """
+                        )
+
+        #Debug
+
         if debug:
-            print(f"Epocas obtenidas de {n_raw}: {len(epochs)}, clases: {epochs.event_id}")
-            #print(epochs)
 
-        #Todo esto se acá abajo son plots que creo que nunca usaré
+            
 
-        if scale == 'small':
-            scaling = {'eeg': 100e-6}
-        elif scale == 'medium':
-            scaling = {'eeg': 50e-6}
-        elif scale == 'large':
-            scaling = {'eeg': 20e-6}
-        else: 
-            scaling = None
+            print(f"RAW: {n_raw}")
 
+            print(f"Eventos detectados: {detected_annotations}")
 
-        #Plotear 10 segundos de los canales con sus eventos (Sanity check)
-        #Asegurarse de que cada señal esté bien alineada a su celda y no se mezclen ni superpongan
-        if show:
-            raw_clean.plot(duration=duration, start=start, scalings=scaling,remove_dc=True,show_scrollbars=False,block=True)
-        else:
-            pass
-        #Retornamos las épocas
+            print(f"Eventos esperados: {set(event_map.keys())}")
+
+            print(f"Clases finales: {wanted_labels}")
+
+            print(f"N epochs: {len(epochs)}")
+
+            print("====================================")
+
         return epochs
     
     def _window( #Aplicar muchas ventanas de tiempo y solape determinado
@@ -852,5 +1019,6 @@ class EEGPreprocess:
         )
 
         print(f"✔️ Dataset {name} guardado en: {path}!")
+
 
     
