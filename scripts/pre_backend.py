@@ -49,19 +49,20 @@ class EEGPreprocess:
         self.sfreq = None
         self.n_channels = None
         self.n_samples = None
-        self.name = None
+        
 
         #Validación de la configuración de eventos
 
         self.config = config
-        self.allowed_classes = {"rest", "left_i", "right_i", "hands_i", "feet_i", "left_m", "right_m", "hands_m", "feet_m"}
+        self.allowed_classes = {"rest", "left_i", "right_i", "hands_i", "feet_i", "left_m", "right_m", "hands_m", "feet_m"} #Por el momento
+        #Sólo vamos a aceptar estas clases con esos nombres específicos
         if not isinstance(self.config, dict):
             raise TypeError(
                 "La configuración debe ser un diccionario."
             )
         
-        self.event_lookup = {}
-        self.available_events = set()
+        self.event_lookup = {} 
+        self.available_events = set() 
 
         for run_group, cfg in self.config.items():
 
@@ -90,7 +91,7 @@ class EEGPreprocess:
                     f"Falta 'mode' en {run_group}"
                 )
 
-            event_map = cfg["events"]
+            event_map = cfg["events"] #La configuración de los eventos, ej: T0: rest, T1: left_i, etc
 
             if self.Debug:
                 print(f"Validando 'events' en {run_group}: {event_map}")
@@ -149,7 +150,7 @@ class EEGPreprocess:
                 self.available_events.add(run_id)
 
                 #self.event_lookup[n] va a tener la configuración de cada evento, es decir, un diccionario con "events" y "mode", que a su vez "events" es un diccionario con la anotación (T0, T1, T2) y su respectiva clase (rest, left_i, etc.)
-                #self.available_events es un set con todos los eventos disponibles, es decir, los números finales de los archivos que corresponden a eventos que sí vamos a procesar (3,4,5,6,7,8,9,10,11,12,13,14)
+                #self.available_events es un set con todos los runs disponibles, es decir, los números finales de los archivos que corresponden a eventos que sí vamos a procesar (3,4,5,6,7,8,9,10,11,12,13,14)
                 #por ejemplo self.event_lookup[3] va a tener la configuración de los eventos con terminación 3, que corresponde a movimiento real mano izquierda o derecha, es decir, un diccionario con "events" y "mode", donde "events" es un diccionario con la anotación (T0, T1, T2) y su respectiva clase (rest, left_m, right_m) y "mode" es "LR_M"
 
         if self.Debug:
@@ -464,15 +465,14 @@ class EEGPreprocess:
             self.dropout_name_str = str(dropout_rate)
             name_channels = len(self.channels) if self.channels is not None else "all"
 
-            df_name = f"Movement_clasify/dropout_rate/{self.n_subjects}_subjects/{name_channels}_channels/dropout_{self.dropout_name_str}.csv"
-            actual_path = os.getcwd()
-            path_save = os.path.join(actual_path, df_name)
+            path_base = os.getcwd()
+            df_name = os.path.join(path_base, f"dropout_rate/{self.n_subjects}_subjects/{name_channels}_channels/dropout_{self.dropout_name_str}.csv")
 
-            if not os.path.exists(os.path.dirname(path_save)):
-                os.makedirs(os.path.dirname(path_save))
+            if not os.path.exists(os.path.dirname(df_name)):
+                os.makedirs(os.path.dirname(df_name))
 
-            df_dropout.to_csv(path_save, index=False)
-            print(f"Tabla guardada en {path_save}!")
+            df_dropout.to_csv(df_name, index=False)
+            print(f"Tabla guardada en {df_name}!")
 
 
 
@@ -652,7 +652,7 @@ class EEGPreprocess:
 
             if name not in event_map: #Si el evento no se encuentra en el diccionario
 
-                raise ValueError(
+                print(
                     f"""
                         Evento inesperado detectado en EDF.
 
@@ -663,6 +663,7 @@ class EEGPreprocess:
                         {list(event_map.keys())}
                         """
                                     )
+                continue
 
             #Asignar los labels correspondientes a cada evento
 
@@ -848,7 +849,7 @@ class EEGPreprocess:
             print(f"Archivo con {n_epochs} épocas → {len(X_windows)} ventanas (size={size}s, step={step}s)")
         
 
-        if len(X_windows) != len(y_windows) != len(trial_local):
+        if not (len(X_windows) == len(y_windows) == len(trial_local)):
             raise ValueError(f"Inconsistencia en número de ventanas: {len(X_windows)} vs {len(y_windows)} vs {len(trial_local)} ERROR EN _WINDOWS")
         
 
@@ -883,8 +884,8 @@ class EEGPreprocess:
 
             if X.shape[1:] != ref_shape:
                 if self.Debug:  
-                    f"⚠️  Aviso: Se descarta X_list[{i}] con shape {X.shape[1:]}, "
-                    f"se esperaba {ref_shape}"
+                    print(f"⚠️  Aviso: Se descarta X_list[{i}] con shape {X.shape[1:]}, ")
+                    print(f"se esperaba {ref_shape}")
 
                 
                 continue
@@ -904,28 +905,88 @@ class EEGPreprocess:
         return X, y, sub, run, trial
 
 
-    def _idx(self, y: np.ndarray) -> None: #Transformar etiquetas a formato numérico
+    def _idx(self, y: np.ndarray) -> None:
 
-        self.class_names = [
-        "rest",    # 0
-        "right_i", # 1
-        "left_i",  # 2
-        "hands_i", # 3
-        "feet_i",  # 4
-        "right_m", # 5
-        "left_m",  # 6
-        "hands_m", # 7
-        "feet_m",  # 8
-    ]
-        
-        LABEL_TO_IDX = {name: i for i, name in enumerate(self.class_names)}
-        
-        unique_labels = np.unique(y)
+        """
+        Convierte etiquetas string a índices numéricos canónicos fijos.
+        El mapping es siempre el mismo independientemente de qué clases
+        estén presentes en el dataset:
+
+            rest     → 0
+            right_i  → 1
+            left_i   → 2
+            hands_i  → 3
+            feet_i   → 4
+            right_m  → 5
+            left_m   → 6
+            hands_m  → 7
+            feet_m   → 8
+        """
+
+        # =====================================================
+        # Mapping canónico fijo
+        # =====================================================
+
+        LABEL_TO_IDX = {
+            "rest":    0,
+            "right_i": 1,
+            "left_i":  2,
+            "hands_i": 3,
+            "feet_i":  4,
+            "right_m": 5,
+            "left_m":  6,
+            "hands_m": 7,
+            "feet_m":  8,
+        }
+
+        IDX_TO_LABEL = {v: k for k, v in LABEL_TO_IDX.items()}
+
+        # =====================================================
+        # Validar que todas las etiquetas en y sean conocidas
+        # =====================================================
+
+        present = set(y)
+        unknown = present - set(LABEL_TO_IDX)
+
+        if unknown:
+            raise ValueError(
+                f"Etiquetas desconocidas en y: {unknown}. "
+                f"Solo se aceptan: {set(LABEL_TO_IDX)}"
+            )
+
+        # class_names solo refleja las clases que realmente aparecen,
+        # pero sus índices numéricos respetan siempre el mapping canónico.
+        self.class_names = IDX_TO_LABEL  # dict completo idx→label
+
+        # =====================================================
+        # Debug
+        # =====================================================
 
         if self.Debug:
-            print(f"Clases únicas antes de idx: {unique_labels}")
-        self.y = np.array([LABEL_TO_IDX[label] for label in y], dtype=np.int32)
 
+            print("====================================")
+            print("Mapping canónico (completo):")
+            for label, idx in LABEL_TO_IDX.items():
+                marker = " ✓" if label in present else ""
+                print(f"  {idx}: {label}{marker}")
+            print(f"Clases presentes en este dataset: {sorted(present)}")
+            print("====================================")
+
+        # =====================================================
+        # Convertir labels
+        # =====================================================
+
+        self.y = np.array(
+            [LABEL_TO_IDX[label] for label in y],
+            dtype=np.int32
+        )
+
+        # =====================================================
+        # Guardar mapping
+        # =====================================================
+
+        self.label_to_idx = LABEL_TO_IDX
+        self.idx_to_label = IDX_TO_LABEL
     
     def resume(self):
         print("\n" + "="*50)
@@ -963,10 +1024,10 @@ class EEGPreprocess:
         print(f"Lista: {self.class_names}")
 
         # Distribución de clases
-        print("\n📊 Distribución de clases:")
+        print("\n📊 Distribución de clases presentes:")
         unique, counts = np.unique(self.y, return_counts=True)
         for u, c in zip(unique, counts):
-            print(f"{self.class_names[u]:10s}: {c}")
+            print(f"  {u} ({self.idx_to_label[u]:10s}): {c}")
 
         # Sujetos
         print("\n👤 Sujetos:")
@@ -1009,7 +1070,10 @@ class EEGPreprocess:
             sub=self.sub.astype(np.int32),
             run=self.run.astype(np.int32),
             trial=self.trial.astype(np.int32),
-            class_names=np.array(self.class_names, dtype=object),
+            class_names=np.array(
+                [self.idx_to_label[i] for i in range(len(self.idx_to_label))],
+                dtype=object
+            ),
             channel_names=np.array(self.channels_names, dtype=object),
             sfreq=np.array([self.sfreq], dtype=np.float32),
             window_size=np.array([self.windows], dtype=np.float32),

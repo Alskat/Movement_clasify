@@ -3,6 +3,7 @@
 #Primero, importamos todas las librerías que ya teníamos antes 
 #Clásicas
 from pdb import run
+from turtle import mode
 
 import numpy as np
 import pandas as pd
@@ -41,7 +42,9 @@ import seaborn as sns
 from sklearn.metrics import (
     confusion_matrix,
     classification_report,
-    precision_recall_fscore_support
+    precision_recall_fscore_support,
+    accuracy_score,
+    f1_score
 )
 
 #0 Clase para almacenar los datos EEG de manera más fácil
@@ -60,12 +63,17 @@ class Selection:
     la clase 0 (rest) si es necesario, y luego fusionar las clases motoras e imaginarias, para finalmente retornar
     los datos ya procesados, listos para el entrenamiento."""
     def __init__(self, pick=None, undersample_rest=True, fusionar=True, random_state=42, Debug=False):
-        
-        self.pick = pick
+    
         self.undersample_rest = undersample_rest #Esto nos ayuda a undersamplear la clase 0 a las demás clases
         self.fusionar = fusionar #Fusionar las clases mecánicas con las imaginarias
         self.random_state = random_state
         self.Debug = Debug
+
+        config = self._determine_state(pick)
+
+        self.pick = config["pick"]
+        self.fusionar = config["fusionar"]
+        self.binary = config["binary"]
 
         #Ahora las los atributos que queremos que retorne 
 
@@ -88,6 +96,74 @@ class Selection:
         self.fine_subject = False
 
         #Ahora ejercemos nuestro pipeline, el cual era: pick, fusionar, luego después se elegirán los sujetos de entrenamiento
+
+    def _determine_state(self, mode):
+
+        if isinstance(mode, list):
+            return {
+                "pick": mode,
+                "fusionar": self.fusionar,
+                "binary": self.binary
+            }
+
+        config_map = {
+
+            # 🔹 FULL
+            0: dict(pick=[0,1,2,3,4,5,6,7,8], fusionar=True, binary=False),
+
+            # 🔹 SOLO MOTOR
+            1: dict(pick=[0,5,6,7,8], fusionar=True, binary=False),
+
+            # 🔹 SOLO IMAGINADO
+            2: dict(pick=[0,1,2,3,4], fusionar=True, binary=False),
+
+            # 🔹 SIN FUSIÓN (9 clases)
+            3: dict(pick=[0,1,2,3,4,5,6,7,8], fusionar=False, binary=False),
+
+            # 🔹 REST-IZQ-DER fusionado
+            4: dict(pick=[0,1,2,5,6], fusionar=True, binary=False),
+
+            # 🔹 REST-MANOS-PIES fusionado
+            5: dict(pick=[0,3,4,7,8], fusionar=True, binary=False),
+
+            # 🔹 REST-IZQ-DER SOLO MOTOR
+            6: dict(pick=[0,5,6], fusionar=False, binary=False),
+
+            # 🔹 REST-MANOS-PIES SOLO MOTOR
+            7: dict(pick=[0,7,8], fusionar=False, binary=False),
+
+            # 🔹 BINARIO
+            8: dict(pick=[0,1,2,3,4,5,6,7,8], fusionar=True, binary=True),
+
+            # 🔹 BINARIO SOLO MOTOR
+            9: dict(pick=[0,5,6,7,8], fusionar=False, binary=True),
+
+            # 🔹 MANOS-PIES FUSIONADO 
+            10: dict(pick=[3,4,7,8], fusionar=True, binary=False),
+
+            # 🔹 MANOS-PIES MOTORES
+            11: dict(pick=[7,8], fusionar=False, binary=False),
+
+            # 🔹 IZQ-DER FUSIONADOS 
+            12: dict(pick=[1,2,5,6], fusionar=True, binary=False),
+
+            # 🔹 IZQ-DER SOLO MOTOR
+            13: dict(pick=[5,6], fusionar=False, binary=False),
+
+            # 🔹 IZQ-DER-MANO-PIES FUSIONADAS 
+
+            14: dict(pick=[1,2,3,4,5,6,7,8], fusionar=True, binary=False),
+
+            # 🔹 IZQ-DER-MANO-PIES MOTORAS 
+
+            15: dict(pick=[5,6,7,8], fusionar=False, binary=False)
+
+        }
+
+        if mode not in config_map:
+            raise ValueError(f"Modo {mode} no definido")
+
+        return config_map[mode]
         
     def load(self, path):   
 
@@ -255,7 +331,8 @@ class Selection:
     def pipeline(self, n=None, undersample_rest=None, binary = False):
         #El pipeline principal consiste en aplicar un pick y luego una fusión, cosas que ya tenemos en otras clases 
         #n sólo es para limitar la cantidad de datos totales, no recuerdo porque lo quise añadir pero ahí está
-    
+        if self.binary is not None:
+            binary = self.binary
         # Paso 1: Pickeo 
         X = self.X
         y = self.y
@@ -741,8 +818,8 @@ def build_eegnet(classes, chans, signal_len,
     )
     return model
 
-def eeg_train(data_obj, mode="subject", test_size=0.1, classes=None, epochs=20, 
-              debug=False, use_class_weight=True, sfreq=160):
+def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1, classes=None, epochs=20, 
+              debug=False, use_class_weight=True, sfreq=160, kern_length=None, F1 = 8):
     
     #0) Definir variables
     X, y, sub, trial, run = data_obj.X, data_obj.y, data_obj.sub, data_obj.trial, data_obj.run
@@ -751,7 +828,7 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, classes=None, epochs=20,
         classes = len(np.unique(y))
 
     #1 Split 
-    split, info = split_eeg(X, y, sub, trial, run, mode = mode, test_size=test_size, debug=debug)
+    split, info = split_eeg(X, y, sub, trial, run, mode = mode, test_size=test_size, val_size=val_size, debug=debug)
 
     #2 Normalización: importante sólo se normaliza X
 
@@ -768,8 +845,9 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, classes=None, epochs=20,
     chans = keras_split.X.train.shape[1]
     signal_len = keras_split.X.train.shape[2]
 
-    kern_length = int(sfreq // 2)   
-    modelo = build_eegnet(classes, chans, signal_len, kern_length=kern_length)
+    kern_length = int(sfreq // 2) if kern_length is None else kern_length
+    
+    modelo = build_eegnet(classes, chans, signal_len, kern_length=kern_length, F1=F1)
 
     #5) Compilar el modelo
     modelo.compile(
@@ -814,10 +892,10 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, classes=None, epochs=20,
     history = modelo.fit(
         keras_split.X.train, keras_split.y.train,
         epochs=epochs,
-        batch_size=32,          # ✅ bajar de 64 a 32
+        batch_size=32,          
         validation_data=(keras_split.X.val, keras_split.y.val),
         callbacks=callbacks,
-        class_weight=class_weight,  # ✅ añadir
+        class_weight=class_weight, 
         verbose=verbose
     )
 
@@ -828,8 +906,8 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, classes=None, epochs=20,
 
     return modelo, history, channel_mean, channel_std, keras_split, info
 
-def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =False, test_size=0.2,
-              unfreeze_last_n=16, lr=5e-4, use_class_weight=True, batch_size=32):
+def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =False, test_size=0.2, val_size=0.1,
+              unfreeze_last_n=16, lr=5e-4, use_class_weight=True, batch_size=32, normalize=True):
 
     #Paso 0: Definir variables
     X, y, sub, trial, run = dataset_fine.X, dataset_fine.y, dataset_fine.sub, dataset_fine.trial, dataset_fine.run
@@ -838,16 +916,22 @@ def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =Fa
         raise ValueError("El finetunning debe ser de un sólo sujeto WEON")
    
 
-    split_fine, _ = split_eeg(X, y, sub, trial, run, mode = "trial", test_size=test_size, debug=debug)
+    split_fine, _ = split_eeg(X, y, sub, trial, run, mode = "trial", test_size=test_size, val_size=val_size, debug=debug)
 
     if debug: 
         print("Tamaño del train:", split_fine.X.train.shape, "Tamaño del val:", split_fine.X.val.shape, "Tamaño del test:", split_fine.X.test.shape)
 
     #Paso 2: Normalización con media y desviación dada (si no se da, se calcula con el mismo método que antes)
+    if normalize:
+        if mean is None or std is None:
+            mean, std = calc_stats(split_fine.X.train)
+        else:
+            mean = mean
+            std = std
+    else:
+        mean, std = calc_stats(split_fine.X.train)
 
-    #if mean is None or std is None:
-    mean, std = calc_stats(split_fine.X.train)
-
+        
     X_train_norm = normalizar_por_canal(split_fine.X.train, mean, std)
     X_val_norm = normalizar_por_canal(split_fine.X.val, mean, std)
     X_test_norm = normalizar_por_canal(split_fine.X.test, mean, std)
@@ -1173,5 +1257,160 @@ def load_model(model_path = None, params_path = None):
     mean = params["mean"]
     std = params["std"]
     return model, mean, std
+
+
+def compare_models(
+    modelo,
+    modelo_ft,
+    keras_split,
+    keras_split_ft,
+    label_map=None,
+    verbose=True
+):
+
+
+    # =====================================================
+    # MODELO GENERAL
+    # =====================================================
+
+    X_test_gen = keras_split.X.test
+    y_test_gen = keras_split.y.test
+
+    y_prob_gen = modelo.predict(X_test_gen, verbose=0)
+    y_pred_gen = np.argmax(y_prob_gen, axis=1)
+
+    acc_gen = accuracy_score(y_test_gen, y_pred_gen)
+
+    f1_gen = f1_score(
+        y_test_gen,
+        y_pred_gen,
+        average='macro'
+    )
+
+    # =====================================================
+    # MODELO FINE-TUNED
+    # =====================================================
+
+    X_test_ft = keras_split_ft.X.test
+    y_test_ft = keras_split_ft.y.test
+
+    y_prob_ft = modelo_ft.predict(X_test_ft, verbose=0)
+    y_pred_ft = np.argmax(y_prob_ft, axis=1)
+
+    acc_ft = accuracy_score(y_test_ft, y_pred_ft)
+
+    f1_ft = f1_score(
+        y_test_ft,
+        y_pred_ft,
+        average='macro'
+    )
+
+    # =====================================================
+    # MEJORAS
+    # =====================================================
+
+    acc_improvement = (
+        (acc_ft - acc_gen)
+        / acc_gen
+    ) * 100
+
+    f1_improvement = (
+        (f1_ft - f1_gen)
+        / f1_gen
+    ) * 100
+
+    abs_acc = (acc_ft - acc_gen) * 100
+    abs_f1 = (f1_ft - f1_gen) * 100
+
+    # =====================================================
+    # NOMBRES DE CLASES
+    # =====================================================
+
+    if label_map is not None:
+        class_names = [
+            label_map[k]
+            for k in sorted(label_map.keys())
+        ]
+    else:
+        n_classes = len(np.unique(y_test_gen))
+        class_names = [str(i) for i in range(n_classes)]
+
+    # =====================================================
+    # PRINT BONITO
+    # =====================================================
+
+    if verbose:
+
+        print("\n" + "="*60)
+        print(" COMPARACIÓN MODELO GENERAL vs FINE-TUNING ")
+        print("="*60)
+
+        print("\n[ MODELO GENERAL ]")
+        print(f"Accuracy : {acc_gen:.4f}")
+        print(f"Macro F1 : {f1_gen:.4f}")
+
+        print("\n[ FINE-TUNING ]")
+        print(f"Accuracy : {acc_ft:.4f}")
+        print(f"Macro F1 : {f1_ft:.4f}")
+
+        print("\n[ MEJORAS ]")
+        print(f"Δ Accuracy absoluta : +{abs_acc:.2f} puntos")
+        print(f"Δ Accuracy relativa : +{acc_improvement:.2f}%")
+
+        print(f"Δ Macro F1 absoluta : +{abs_f1:.2f} puntos")
+        print(f"Δ Macro F1 relativa : +{f1_improvement:.2f}%")
+
+        print("\n" + "="*60)
+
+        print("\n=== Classification Report (General) ===\n")
+
+        print(
+            classification_report(
+                y_test_gen,
+                y_pred_gen,
+                target_names=class_names,
+                zero_division=0
+            )
+        )
+
+        print("\n=== Classification Report (Fine-Tuning) ===\n")
+
+        print(
+            classification_report(
+                y_test_ft,
+                y_pred_ft,
+                target_names=class_names,
+                zero_division=0
+            )
+        )
+
+    # =====================================================
+    # RETURN
+    # =====================================================
+
+    return {
+
+        # GENERAL
+        "acc_general": acc_gen,
+        "f1_general": f1_gen,
+
+        # FINE
+        "acc_fine": acc_ft,
+        "f1_fine": f1_ft,
+
+        # MEJORAS
+        "acc_improvement_percent": acc_improvement,
+        "f1_improvement_percent": f1_improvement,
+
+        "acc_absolute_gain": abs_acc,
+        "f1_absolute_gain": abs_f1,
+
+        # PREDICCIONES
+        "y_true_general": y_test_gen,
+        "y_pred_general": y_pred_gen,
+
+        "y_true_fine": y_test_ft,
+        "y_pred_fine": y_pred_ft,
+    }
     
 
