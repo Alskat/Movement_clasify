@@ -50,7 +50,7 @@ logs/
 
 # --- VSCode ---
 .vscode/
-
+dropout_rate/
 dataset_physionet/
 Recursos/
 Movement_clasify/notebooks/EEGNet_best.keras
