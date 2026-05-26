@@ -12,6 +12,10 @@ import pandas as pd
 import sys
 import os
 
+import json
+from pathlib import Path
+from datetime import datetime
+
 
 
 
@@ -924,25 +928,23 @@ def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =Fa
     #Paso 2: Normalización con media y desviación dada (si no se da, se calcula con el mismo método que antes)
     if normalize:
         if mean is None or std is None:
-            mean, std = calc_stats(split_fine.X.train)
+            norm_split, mean, std = normalizar_split(split_fine)
         else:
             mean = mean
             std = std
     else:
-        mean, std = calc_stats(split_fine.X.train)
+        norm_split, mean, std = normalizar_split(split_fine)
 
         
-    X_train_norm = normalizar_por_canal(split_fine.X.train, mean, std)
-    X_val_norm = normalizar_por_canal(split_fine.X.val, mean, std)
-    X_test_norm = normalizar_por_canal(split_fine.X.test, mean, std)
+
 
     #Paso 3: Ajustar forma para Keras
 
-    X_train_keras = ajustar_keras(X_train_norm)
-    X_val_keras = ajustar_keras(X_val_norm)
-    X_test_keras = ajustar_keras(X_test_norm)
+    keras_split_fine = prepare_keras_split(norm_split)
+
+
     if debug:
-        print("Antes de normalizar:", split_fine.X.train.shape, "Después de ajustar para Keras:", X_train_keras.shape)   
+        print("Antes de normalizar:", split_fine.X.train.shape, "Después de ajustar para Keras:", keras_split_fine.X.train.shape)   
     
     #Paso 4: Clonar modelo para finetunning (para no afectar el modelo original)
     model_ft = clone_model(base)
@@ -998,8 +1000,8 @@ def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =Fa
 
     #Paso 7: entrenamiento de fine-tuning
     history = model_ft.fit(
-        X_train_keras, split_fine.y.train,
-        validation_data=(X_val_keras, split_fine.y.val),
+        keras_split_fine.X.train, split_fine.y.train,
+        validation_data=(keras_split_fine.X.val, split_fine.y.val),
         callbacks=callbacks,
         epochs=epochs,
         batch_size=batch_size,          
@@ -1008,11 +1010,11 @@ def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =Fa
     )
 
     #Paso 8: evaluación en test del sujeto
-    test_loss, test_acc = model_ft.evaluate(X_test_keras, split_fine.y.test, verbose=0)
+    test_loss, test_acc = model_ft.evaluate(keras_split_fine.X.test, split_fine.y.test, verbose=0)
     print(f"[Fine-tune] Test loss={test_loss:.4f}, acc={test_acc:.4f}")
 
     keras_split_fine = DataSplit(
-        X_train_keras, X_val_keras, X_test_keras,
+        keras_split_fine.X.train, keras_split_fine.X.val, keras_split_fine.X.test,
         split_fine.y.train, split_fine.y.val, split_fine.y.test,
         split_fine.sub.train, split_fine.sub.val, split_fine.sub.test,
         split_fine.trial.train, split_fine.trial.val, split_fine.trial.test,
@@ -1233,15 +1235,7 @@ def plot_history(history, metrics=("accuracy",), title_prefix="EEGNet"): #Lo má
         plt.tight_layout()
         plt.show()
 
-def save_model(model, mean, std, path = None, name_model = "model_EEGnet.keras", name_params = "params_EEGnet.npz"):
-    if path is None:
-        print("no se ha especificado el path, se guardará en el directorio actual")
-        path = os.getcwd()
-    if not os.path.exists(os.path.dirname(path)):
-        print(f"creando el directorio {os.path.dirname(path)}")
-        os.makedirs(os.path.dirname(path))
-    model.save(os.path.join(path, name_model))
-    np.savez(os.path.join(path, name_params), mean=mean, std=std)
+
     
 def load_model(model_path = None, params_path = None):
     from tensorflow.keras.models import load_model
@@ -1257,6 +1251,118 @@ def load_model(model_path = None, params_path = None):
     mean = params["mean"]
     std = params["std"]
     return model, mean, std
+
+def build_canonical_to_model_map(data_obj):
+    """
+    Construye el mapping entre las etiquetas canónicas originales del dataset
+    y los índices locales de salida del modelo entrenado.
+
+    Ejemplo para mode=4:
+        rest    -> 0
+        right_i -> 1
+        left_i  -> 2
+        right_m -> 1
+        left_m  -> 2
+    """
+
+    if data_obj.label_map is None:
+        raise ValueError(
+            "data_obj.label_map no existe. "
+            "Debes ejecutar Selection.pipeline() antes de guardar el modelo."
+        )
+
+    model_class_names = [
+        data_obj.label_map[i]
+        for i in sorted(data_obj.label_map.keys())
+    ]
+
+    canonical_classes_used = [
+        str(data_obj.class_names_og[idx])
+        for idx in data_obj.pick
+    ]
+
+    canonical_to_model = {}
+
+    for canonical_name in canonical_classes_used:
+
+        if data_obj.binary:
+            local_name = "rest" if canonical_name == "rest" else "no_rest"
+
+        elif canonical_name in model_class_names:
+            local_name = canonical_name
+
+        elif data_obj.fusionar:
+            if canonical_name == "rest":
+                local_name = "rest"
+            else:
+                # right_i -> right, left_m -> left, hands_i -> hands...
+                local_name = canonical_name.rsplit("_", 1)[0]
+
+        else:
+            local_name = canonical_name
+
+        if local_name not in model_class_names:
+            raise ValueError(
+                f"No fue posible mapear la clase canónica '{canonical_name}' "
+                f"a las clases finales del modelo: {model_class_names}."
+            )
+
+        canonical_to_model[canonical_name] = model_class_names.index(local_name)
+
+    return canonical_to_model
+
+def save_model(
+    model,
+    mean,
+    std,
+    label_map,
+    path=None,
+    name="model_EEGNet"
+):
+    """
+    Guarda:
+        <name>.keras -> modelo entrenado
+        <name>.npz   -> mean, std y significado de sus salidas
+    """
+
+    if path is None:
+        path = os.getcwd()
+
+    os.makedirs(path, exist_ok=True)
+
+    if name.endswith(".keras") or name.endswith(".npz"):
+        raise ValueError("name debe ir sin extensión.")
+    
+    
+
+    n_outputs = model.output_shape[-1] #Entrega el número de salidas del modelo, que debería coincidir con el número de clases que tenemos después del pickeo y la fusión
+
+    if sorted(label_map.keys()) != list(range(n_outputs)):
+        raise ValueError(
+            f"label_map incompatible con el modelo. "
+            f"Modelo: {n_outputs} salidas | label_map: {label_map}"
+        )
+
+    class_names = np.array( #Entrega un array con los nombres de las salidas
+        [label_map[i] for i in range(n_outputs)],
+        dtype=str
+    )
+
+    model_path = os.path.join(path, f"{name}.keras")
+    params_path = os.path.join(path, f"{name}.npz")
+
+    model.save(model_path)
+
+    np.savez_compressed(
+        params_path,
+        mean=np.asarray(mean, dtype=np.float32),
+        std=np.asarray(std, dtype=np.float32),
+        class_names=class_names
+    )
+
+    print(f"Modelo guardado: {model_path}")
+    print(f"Parámetros guardados: {params_path}")
+    print(f"Clases del modelo: {dict(enumerate(class_names))}")
 
 
 def compare_models(

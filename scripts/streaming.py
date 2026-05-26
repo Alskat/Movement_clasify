@@ -4,7 +4,24 @@ import socket
 import numpy as np
 import mne
 
-EDF_PATH = "scripts/S007R04.edf"
+#Cargamos todo lo relacionaod a la señal
+EDF_PATH = "scripts/S007R03.edf"
+type = 1 
+if type == 1:
+    event_map = {
+    "T0": "rest",
+    "T1": "left",
+    "T2": "right"
+}
+else:
+    event_map = {
+    "T0": "rest",
+    "T1": "hands",
+    "T2": "feet"
+}
+    
+
+#Todo lo relacionado al stream 
 
 HOST = "127.0.0.1"
 
@@ -28,6 +45,8 @@ if msg != "READY":
 
 print("[STREAMER] READY recibido.")
 print("[STREAMER] Iniciando streaming...\n")
+
+#Cargamos la señal a enviar
 
 raw = mne.io.read_raw_edf(
     EDF_PATH,
@@ -99,13 +118,16 @@ for i in range(n_samples):
         event_code = events[event_pointer][2]
 
         event_name = reverse_event_map[event_code]
+        semantic_event = event_map[event_name]
 
         event_packet = {
-        "type": "EVENT",
-        "event": event_name,
-        "sample_idx": i,
-        "timestamp": time.time()
+            "type": "EVENT",
+            "event": semantic_event,
+            "sample_idx": i,
+            "timestamp": time.time()
         }
+
+
 
         msg = json.dumps(event_packet).encode("utf-8")
         sock_stream.sendto(

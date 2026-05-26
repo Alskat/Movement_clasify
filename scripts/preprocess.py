@@ -10,14 +10,16 @@ from scipy.signal import (
 import warnings
 from time import perf_counter
 
+from tensorflow.keras.models import load_model
+from pathlib import Path
+
 class Preprocessor:
 
-    def __init__(self, use_notch=True, mean=None, std=None, lowcut=8.0, highcut=30.0, notch_freq=50.0,
-                 current_Fs = 160, current_duration = 1.0):
+    def __init__(self, use_notch=True, lowcut=8.0, highcut=30.0, notch_freq=50.0,
+                 current_Fs = 160, current_duration = 1.0, model_path=None):
     
         self.use_notch = use_notch
-        self.mean = mean
-        self.std = std
+
         self.lowcut = lowcut
         self.highcut = highcut
         self.notch_freq = notch_freq
@@ -34,7 +36,7 @@ class Preprocessor:
         #Diseñamos los filtros de una vez para ejecutarlos sólo una vez 
 
         self.fir_coeff = firwin(
-            101,
+            31,
             [8.0, 30.0],
             pass_zero=False,
             fs=self.current_Fs
@@ -45,7 +47,20 @@ class Preprocessor:
                 Q=30,
                 fs=self.current_Fs
             )
+        #Cargar modelos para la predicción
 
+
+        model_path = Path(model_path)
+        params_path = model_path.with_suffix(".npz")
+
+        self.model = load_model(model_path)
+
+        params = np.load(params_path)
+
+        self.mean = params["mean"]
+        self.std = params["std"]
+        self.class_names = list(params["class_names"])
+                
 
     def preprocess_window(self, window):
         #Acá vamos a aplicar todo el pipeline de procesamiento del buffer que recibimos 
@@ -92,10 +107,31 @@ class Preprocessor:
         #5) Reshapeamos a la forma que espersa Keras: 
 
         window = window[np.newaxis, :, :, np.newaxis]
-        end_time = perf_counter()
-        processing_time = end_time - init_time
 
-        return window, processing_time
+        #6) Aplicamos el modelo para obtener la predicción
+
+        prediction = self.model.predict(window, verbose=0)
+
+        predicted_class = np.argmax(
+            prediction,
+            axis=1
+        )[0]
+        predicted_name = self.class_names[predicted_class]
+
+        confidence = np.max(prediction)
+
+
+        end_time = perf_counter()
+        processing_time = (end_time - init_time) * 1000
+
+        return {
+                "window": window,
+                "predicted_class": predicted_class,
+                "confidence": confidence,
+                "raw_prediction": prediction,
+                "predicted_name": predicted_name,
+                "processing_time_ms": processing_time
+            }
         
 
 
@@ -133,11 +169,19 @@ class Preprocessor:
     def normalize_window(self, window, mean=None, std=None, eps=1e-6):
 
         if mean is None or std is None:
+            warnings.warn("No se proporcionaron valores de media y desviación estándar para la normalización. Se calcularán a partir de la ventana actual, lo que puede introducir data leakage. Se recomienda proporcionar valores pre-calculados.")
             mean = np.mean(window, axis=1, keepdims=True)
             std = np.std(window, axis=1, keepdims=True)
             
-        
-        normalized_window = (window - mean[:, np.newaxis]) / (std[:, np.newaxis] + eps)
+        mean = np.asarray(mean).reshape(-1, 1)
+        std = np.asarray(std).reshape(-1, 1)
+
+        if mean.shape[0] != window.shape[0]:
+            raise ValueError(
+                f"Mean/std corresponden a {mean.shape[0]} canales, "
+                f"pero la ventana tiene {window.shape[0]}."
+            )
+        normalized_window = (window - mean) / (std + eps)
 
         return normalized_window
 

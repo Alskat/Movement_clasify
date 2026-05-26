@@ -2,6 +2,7 @@ import json
 import socket
 import numpy as np
 import time
+from preprocess import Preprocessor
 
 HOST = "127.0.0.1"
 
@@ -44,6 +45,13 @@ last_packet_time = time.time()
 last_idx = -1
 
 current_event = "NONE"
+
+
+
+#Paths de los modelos y métricas 
+
+model_path = "Recursos/models/fined/v2/4_mode_finned_model_v1/EEGNet_LR3_subject07_ft_v1.keras"
+
 
 while True:
 
@@ -97,16 +105,23 @@ while True:
         print(channel_names)
         fs = packet["fs"]
         duration = packet["duration"]
+        
         half = int(fs/2)
+
+        preprocessor = Preprocessor(
+            current_Fs = fs,
+            current_duration = 1.0,
+            model_path = model_path
+        )
     
     elif packet["type"] == "EVENT":
         current_event = packet["event"]
         print(
             f"\nSe ha detectado un nuevo evento: "
             f"{current_event} | "
-            f"sample_idx={packet['sample_idx']} | "
-            f"timestamp={packet['timestamp']}"
+            f"sample_idx={packet['sample_idx']}  "
         )
+        
 
     elif packet["type"] == "SAMPLE":
         sample = np.array(
@@ -139,15 +154,24 @@ while True:
                 axis=1
             )
 
-            window = window[np.newaxis, :, :]
-
-            
-
             print(
                 f"[WINDOW] "
                 f"{buffer_count} / {duration*2} | "
                 f"shape={window.shape}"
             )
+
+            #preprocesamos la ventana
+
+            result = preprocessor.preprocess_window(window)
+
+            #enviamos la ventana
+
+            #print(f"Dimensiones de la ventana preprocesada: {result['window'].shape}")
+            print(f"Predicción: clase={result['predicted_name']} | confidence={result['confidence']:.4f} |{result['processing_time_ms']:.2f} ms) ")
+            if result['predicted_name'] == current_event:
+                print(f"✅Predicción coincide con el evento actual")
+            else:
+                print(f"❌Predicción NO coincide con el evento actual")
             buffer_count += 1
             buffer = buffer[half:] #Deslizamiento del 50%
 
