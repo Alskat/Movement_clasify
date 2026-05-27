@@ -5,7 +5,7 @@ import numpy as np
 import mne
 
 #Cargamos todo lo relacionaod a la señal
-EDF_PATH = "scripts/S007R03.edf"
+EDF_PATH = "dataset_physionet/files/S007/S007R03.edf"
 type = 1 
 if type == 1:
     event_map = {
@@ -42,6 +42,10 @@ msg = data.decode("utf-8")
 if msg != "READY":
     print("[STREAMER] Mensaje inválido.")
     exit()
+
+# Después del handshake, el socket de control no debe bloquear el streaming.
+# Solo revisaremos si ha llegado una orden STOP.
+sock_control.setblocking(False)
 
 print("[STREAMER] READY recibido.")
 print("[STREAMER] Iniciando streaming...\n")
@@ -90,7 +94,24 @@ t0 = time.perf_counter()
 send_data=1
 event_pointer = 0
 
+stopped_by_user = False
+
 for i in range(n_samples):
+
+
+    # Revisar si el receiver pidió detener el streaming
+    try:
+        control_data, control_addr = sock_control.recvfrom(1024)
+        control_msg = control_data.decode("utf-8")
+
+        if control_msg == "STOP":
+            print("\n[STREAMER] STOP recibido. Streaming detenido por el receiver.")
+            stopped_by_user = True
+            break
+
+    except BlockingIOError:
+        # No llegó ningún mensaje de control; continuamos transmitiendo.
+        pass
 
     sample = data[:, i].astype(float)
 
@@ -172,4 +193,7 @@ sock_stream.sendto(
     (HOST, STREAM_PORT)
 )
 
-print("\n[STREAMER] Streaming terminado.")
+if stopped_by_user:
+    print("[STREAMER] Stream cerrado manualmente.")
+else:
+    print("[STREAMER] Streaming terminado: fin del EDF.")

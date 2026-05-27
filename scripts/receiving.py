@@ -2,7 +2,7 @@ import json
 import socket
 import numpy as np
 import time
-from preprocess import Preprocessor
+from preprocess import Preprocessor, resumir_ventanas
 
 HOST = "127.0.0.1"
 
@@ -44,135 +44,192 @@ last_packet_time = time.time()
 
 last_idx = -1
 
-current_event = "NONE"
+current_event = None
+
+slide = True
 
 
 
 #Paths de los modelos y métricas 
 
-model_path = "Recursos/models/fined/v2/4_mode_finned_model_v1/EEGNet_LR3_subject07_ft_v1.keras"
+model_path = "Recursos/models/fined/v2/8_mode_bin_model_v1/EEGNet_LR3_subject07_ft_v1.keras"
+aux_model_path = "Recursos/models/fined/v2/12_mode_id_f_model_v1/EEGNet_LR3_subject07_ft_v1.keras"
+
+#Para comprobar el accuracy de nuestras predicciones: 
+
+y_true_stable = []
+y_pred_stable = []
 
 
-while True:
+total_windows = 0
 
-    try:
+event_buffer = []
 
-        data, addr = sock_stream.recvfrom(65535)
+try:
+    while True:
 
-        last_packet_time = time.time()
+        try:
 
-    except socket.timeout:
+            data, addr = sock_stream.recvfrom(65535)
 
-        elapsed = (
-            time.time() - last_packet_time
+            last_packet_time = time.time()
+
+        except socket.timeout:
+
+            elapsed = (
+                time.time() - last_packet_time
+            )
+
+            
+
+            if elapsed > 10:
+                print(
+                    "[ERROR] "
+                    "No llegaron paquetes."
+                )
+                break
+
+            continue
+
+        packet = json.loads(
+        
+            data.decode("utf-8")
         )
 
-        
+        if packet.get("type") == "END":
 
-        if elapsed > 10:
             print(
-                "[ERROR] "
-                "No llegaron paquetes."
+                "\n[CONTROL] "
+                "END recibido."
             )
+
             break
 
-        continue
+        if packet["type"] == "CONFIG":
 
-    packet = json.loads(
-     
-        data.decode("utf-8")
+            print("Se recibe una nueva señal:")
+            channel_names = packet["channels"]
+
+            print(
+                f"[INFO] "
+                f"Canales: {len(channel_names)}"
+            )
+
+            print(channel_names)
+            fs = packet["fs"]
+            duration = packet["duration"]
+            
+            half = int(fs/2)
+
+            preprocessor = Preprocessor(
+                current_Fs = fs,
+                current_duration = 1.0,
+                model_path = model_path,
+                aux_path = aux_model_path,
+                use_bin = True
+            )
+        
+        elif packet["type"] == "EVENT":
+            current_event = packet["event"]
+            print(
+                f"\nSe ha detectado un nuevo evento: "
+                f"{current_event} | "
+                f"sample_idx={packet['sample_idx']}  "
+            )
+            
+
+        elif packet["type"] == "SAMPLE":
+            sample = np.array(
+                packet["sample"],
+                dtype=float
+            )
+
+
+            if packet["idx"] != last_idx + 1:
+
+                print(
+                    f"[WARNING] "
+                    f"Packet loss: "
+                    f"{last_idx} -> {packet['idx']}"
+                )
+
+            last_idx = packet["idx"]
+
+            latency = (
+                time.time() - packet["timestamp"]
+            ) * 1000
+
+            buffer.append(sample)
+            event_buffer.append(current_event)
+
+
+            if len(buffer) == WINDOW_SAMPLES: #Se llena la ventana de 160 muestras
+
+                total_windows += 1
+
+                window = np.stack( #Creamos nuestra ventana 
+                    buffer,
+                    axis=1
+                )
+
+                
+
+                print(
+                    f"[WINDOW] "
+                    f"{buffer_count} / {duration*2} | "
+                    f"shape={window.shape}"
+                )
+
+                #preprocesamos la ventana
+
+                result = preprocessor.preprocess_window(window)
+
+                predicted_name = result["predicted_name"]
+                true_event = event_buffer[0]
+
+                labels_in_window = set(event_buffer)
+
+                y_true_stable.append(true_event)
+                y_pred_stable.append(predicted_name)
+
+                #print(f"Dimensiones de la ventana preprocesada: {result['window'].shape}")
+                print(f"Predicción: clase={result['predicted_name']} | confidence={result['confidence']:.4f} |{result['processing_time_ms']:.2f} ms) ")
+                if result['predicted_name'] == current_event:
+                    print(f"✅Predicción coincide con el evento actual")
+                else:
+                    print(f"❌Predicción NO coincide con el evento actual")
+
+        
+                
+                buffer_count += 1
+                if slide:
+                    buffer = buffer[half:] #Deslizamiento del 50%
+                    event_buffer = event_buffer[half:]
+                else:
+                    buffer = [] #Deslizamiento del 50%
+                    event_buffer = []
+except KeyboardInterrupt:
+    print("\n[RECEIVER] Detenido por el usuario.")
+
+finally:
+
+    sock_control.sendto(
+        "STOP".encode("utf-8"),
+        (HOST, CONTROL_PORT)
     )
 
-    if packet.get("type") == "END":
+    print("[RECEIVER] Señal STOP enviada al streamer.")
 
-        print(
-            "\n[CONTROL] "
-            "END recibido."
-        )
+    resumir_ventanas(
+        y_true_stable,
+        y_pred_stable,
+        class_names=preprocessor.class_names,
+        total_windows=total_windows
+    )
 
-        break
+    sock_stream.close()
+    sock_control.close()
 
-    if packet["type"] == "CONFIG":
-
-        print("Se recibe una nueva señal:")
-        channel_names = packet["channels"]
-
-        print(
-            f"[INFO] "
-            f"Canales: {len(channel_names)}"
-        )
-
-        print(channel_names)
-        fs = packet["fs"]
-        duration = packet["duration"]
-        
-        half = int(fs/2)
-
-        preprocessor = Preprocessor(
-            current_Fs = fs,
-            current_duration = 1.0,
-            model_path = model_path
-        )
-    
-    elif packet["type"] == "EVENT":
-        current_event = packet["event"]
-        print(
-            f"\nSe ha detectado un nuevo evento: "
-            f"{current_event} | "
-            f"sample_idx={packet['sample_idx']}  "
-        )
-        
-
-    elif packet["type"] == "SAMPLE":
-        sample = np.array(
-            packet["sample"],
-            dtype=float
-        )
-
-
-        if packet["idx"] != last_idx + 1:
-
-            print(
-                f"[WARNING] "
-                f"Packet loss: "
-                f"{last_idx} -> {packet['idx']}"
-            )
-
-        last_idx = packet["idx"]
-
-        latency = (
-            time.time() - packet["timestamp"]
-        ) * 1000
-
-        buffer.append(sample)
-
-
-        if len(buffer) == WINDOW_SAMPLES: #Se llena la ventana de 160 muestras
-
-            window = np.stack(
-                buffer,
-                axis=1
-            )
-
-            print(
-                f"[WINDOW] "
-                f"{buffer_count} / {duration*2} | "
-                f"shape={window.shape}"
-            )
-
-            #preprocesamos la ventana
-
-            result = preprocessor.preprocess_window(window)
-
-            #enviamos la ventana
-
-            #print(f"Dimensiones de la ventana preprocesada: {result['window'].shape}")
-            print(f"Predicción: clase={result['predicted_name']} | confidence={result['confidence']:.4f} |{result['processing_time_ms']:.2f} ms) ")
-            if result['predicted_name'] == current_event:
-                print(f"✅Predicción coincide con el evento actual")
-            else:
-                print(f"❌Predicción NO coincide con el evento actual")
-            buffer_count += 1
-            buffer = buffer[half:] #Deslizamiento del 50%
+    print("[RECEIVER] Receiver finalizado.")
 
 print("\n[RECEIVER] Receiver finalizado.")

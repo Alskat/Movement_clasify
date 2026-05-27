@@ -508,6 +508,8 @@ class Selection:
 
         y_semantic = np.array([name_to_new[label_to_name[val]] for val in y], dtype=np.int32)
 
+        
+
         return y_semantic, semantic_names
     
 
@@ -930,8 +932,17 @@ def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =Fa
         if mean is None or std is None:
             norm_split, mean, std = normalizar_split(split_fine)
         else:
-            mean = mean
-            std = std
+            X_train = normalizar_por_canal(split_fine.X.train, mean, std)
+            X_val = normalizar_por_canal(split_fine.X.val, mean, std)
+            X_test = normalizar_por_canal(split_fine.X.test, mean, std)
+
+            norm_split = DataSplit(
+                X_train, X_val, X_test,
+                split_fine.y.train, split_fine.y.val, split_fine.y.test,
+                split_fine.sub.train, split_fine.sub.val, split_fine.sub.test,
+                split_fine.trial.train, split_fine.trial.val, split_fine.trial.test,
+                split_fine.run.train, split_fine.run.val, split_fine.run.test
+            )
     else:
         norm_split, mean, std = normalizar_split(split_fine)
 
@@ -1079,14 +1090,18 @@ def undersample(X, y, sub, rest_label=0, random_state=42, debug=False):
 
     return X_new, y_new, sub_new
 
-def evaluate(modelo, keras_split, label_map=None, title="EEGNet"):
+def evaluate(modelo, keras_split, label_map=None, title="EEGNet", all_data = False):
     """
     Evaluar directamente un modelo de manera más rápida
     """
 
     # 1. Datos
-    X_test = keras_split.X.test
-    y_test = keras_split.y.test
+    if all_data: #Acá usamos los datos del test, val y train
+        X_test = np.concatenate([keras_split.X.train, keras_split.X.val, keras_split.X.test], axis=0)
+        y_test = np.concatenate([keras_split.y.train, keras_split.y.val, keras_split.y.test], axis=0)
+    else: 
+        X_test = keras_split.X.test
+        y_test = keras_split.y.test
 
     # 2. Predicción
     y_prob = modelo.predict(X_test)
@@ -1348,6 +1363,15 @@ def save_model(
         dtype=str
     )
 
+    simp_class_names = []
+
+    for name_in in class_names:
+        if name_in.endswith("_m") or name_in.endswith("_i"):
+            name_in = name_in[:-2]
+
+        simp_class_names.append(name_in)
+
+
     model_path = os.path.join(path, f"{name}.keras")
     params_path = os.path.join(path, f"{name}.npz")
 
@@ -1357,7 +1381,7 @@ def save_model(
         params_path,
         mean=np.asarray(mean, dtype=np.float32),
         std=np.asarray(std, dtype=np.float32),
-        class_names=class_names
+        class_names=simp_class_names
     )
 
     print(f"Modelo guardado: {model_path}")

@@ -13,10 +13,18 @@ from time import perf_counter
 from tensorflow.keras.models import load_model
 from pathlib import Path
 
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    confusion_matrix,
+    classification_report
+)
+
 class Preprocessor:
 
     def __init__(self, use_notch=True, lowcut=8.0, highcut=30.0, notch_freq=50.0,
-                 current_Fs = 160, current_duration = 1.0, model_path=None):
+                 current_Fs = 160, current_duration = 1.0, model_path=None,
+                 aux_path = None, use_bin = False):
     
         self.use_notch = use_notch
 
@@ -24,6 +32,7 @@ class Preprocessor:
         self.highcut = highcut
         self.notch_freq = notch_freq
         self.use_notch = use_notch
+        self.use_bin = use_bin
 
         #Metadatos que necesitamos para el modelo 
 
@@ -47,6 +56,8 @@ class Preprocessor:
                 Q=30,
                 fs=self.current_Fs
             )
+
+            
         #Cargar modelos para la predicción
 
 
@@ -60,6 +71,27 @@ class Preprocessor:
         self.mean = params["mean"]
         self.std = params["std"]
         self.class_names = list(params["class_names"])
+
+        #Hacer lo mismo con el auxiliar 
+        if use_bin:
+
+            if aux_path is None:
+                 raise ValueError( "Si use_bin=True, debes proporcionar aux_path.")
+            
+
+            aux_model_path = Path(aux_path)
+            aux_params_path = aux_model_path.with_suffix(".npz")
+
+            self.aux_model = load_model(aux_model_path)
+
+            aux_params = np.load(aux_params_path)
+
+            self.aux_mean = aux_params["mean"]
+            self.aux_std = aux_params["std"]
+            self.aux_class_names = list(aux_params["class_names"])
+            
+            self.class_names = [ self.class_names[0],*self.aux_class_names]
+            print(f"Clases finales: {self.class_names}")
                 
 
     def preprocess_window(self, window):
@@ -97,28 +129,24 @@ class Preprocessor:
             )
 
         #4) Normalizamos la señal 
+        if not self.use_bin:
+            window = self.normalize_window(
+                window,
+                mean=self.mean,
+                std=self.std
+            )
 
-        window = self.normalize_window(
-            window,
-            mean=self.mean,
-            std=self.std
-        )
+            #5) Reshapeamos a la forma que espersa Keras: 
 
-        #5) Reshapeamos a la forma que espersa Keras: 
-
-        window = window[np.newaxis, :, :, np.newaxis]
+            window = window[np.newaxis, :, :, np.newaxis]
 
         #6) Aplicamos el modelo para obtener la predicción
 
-        prediction = self.model.predict(window, verbose=0)
+        predicted_class, predicted_name, confidence, prediction = self.predict(window)
 
-        predicted_class = np.argmax(
-            prediction,
-            axis=1
-        )[0]
-        predicted_name = self.class_names[predicted_class]
+        
 
-        confidence = np.max(prediction)
+        
 
 
         end_time = perf_counter()
@@ -185,4 +213,143 @@ class Preprocessor:
 
         return normalized_window
 
+    def predict(self, window):
+        if not self.use_bin:
+            prediction = self.model.predict(window, verbose=0)  
 
+            predicted_class = np.argmax(
+            prediction,
+            axis=1
+            )[0]
+
+            predicted_name = self.class_names[predicted_class]
+
+            confidence = np.max(prediction)
+
+         
+        
+        else: 
+            #Hay que aplicar varios modelos, por lo cual debemos hacer unos pasos extras
+
+            window_bin = self.normalize_window(window,mean=self.mean,std=self.std) #Primero la ventana del modelo binario
+
+            window_bin = window_bin[np.newaxis, :, :, np.newaxis]
+
+
+            prediction_bin = self.model.predict(window_bin, verbose=0)
+            predicted_class_bin = np.argmax(
+            prediction_bin,
+            axis=1
+            )[0]
+
+            if predicted_class_bin == 0: 
+                predicted_class = predicted_class_bin
+                prediction = prediction_bin
+                predicted_name = self.class_names[predicted_class_bin]
+                
+                confidence = np.max(prediction_bin)
+            else: 
+                #Debemos hacer el mismo proceso con la ventana ahora con el modelo auxiliar 
+
+                window = self.normalize_window(window,mean=self.aux_mean,std=self.aux_std) #Primero la ventana del modelo binario
+
+                window = window[np.newaxis, :, :, np.newaxis]
+                prediction = self.aux_model.predict(window, verbose=0)  
+
+                predicted_class = np.argmax(
+                prediction,
+                axis=1
+                )[0]
+                
+
+                predicted_name = self.class_names[predicted_class + 1]
+
+                confidence = np.max(prediction)
+        return predicted_class, predicted_name, confidence, prediction
+        
+
+def resumir_ventanas(
+    y_true,
+    y_pred,
+    class_names,
+    total_windows=0
+):
+    """
+    Imprime métricas solo sobre ventanas estables.
+    Las ventanas de transición se contabilizan aparte,
+    porque contienen muestras de más de un evento.
+    """
+
+    if len(y_true) == 0:
+        print("\n[SUMMARY] No existen ventanas estables para evaluar.")
+        print(f"[SUMMARY] Ventanas totales: {total_windows}")
+        
+        return
+
+    labels = list(class_names)
+
+    accuracy = accuracy_score(y_true, y_pred)
+
+    macro_f1 = f1_score(
+        y_true,
+        y_pred,
+        labels=labels,
+        average="macro",
+        zero_division=0
+    )
+
+    cm = confusion_matrix(
+        y_true,
+        y_pred,
+        labels=labels
+    )
+
+    stable_windows = len(y_true)
+
+    print("\n" + "=" * 65)
+    print("RESUMEN DE VALIDACIÓN ONLINE - VENTANAS ESTABLES")
+    print("=" * 65)
+
+    print(f"Ventanas totales       : {total_windows}")
+    print(f"Ventanas estables      : {stable_windows}")
+    
+
+    print(f"\nAccuracy estable       : {accuracy:.4f}")
+    print(f"Macro F1 estable       : {macro_f1:.4f}")
+
+    print("\nAciertos por clase:")
+
+    for idx, class_name in enumerate(labels):
+
+        total_class = int(cm[idx, :].sum())
+        correct_class = int(cm[idx, idx])
+
+        if total_class == 0:
+            print(f"  {class_name:>8}: sin ventanas evaluadas")
+            continue
+
+        class_accuracy = correct_class / total_class
+
+        print(
+            f"  {class_name:>8}: "
+            f"{correct_class}/{total_class} "
+            f"({class_accuracy * 100:.1f}%)"
+        )
+
+    print("\nMatriz de confusión:")
+    print("Filas = real | Columnas = predicción")
+    print(f"Orden: {labels}")
+    print(cm)
+
+    print("\nReporte por clase:")
+    print(
+        classification_report(
+            y_true,
+            y_pred,
+            labels=labels,
+            target_names=labels,
+            zero_division=0
+        )
+    )
+
+    print("=" * 65)
