@@ -3,23 +3,51 @@ import json
 import socket
 import numpy as np
 import mne
+import argparse
 
-#Cargamos todo lo relacionaod a la señal
-EDF_PATH = "dataset_physionet/files/S007/S007R03.edf"
-type = 1 
-if type == 1:
+
+#Todo esto serán argumentos que se seleccionarán en la consola
+parser = argparse.ArgumentParser(
+    description="Streamer pseudo-online de señales EEG desde un archivo EDF."
+)
+
+parser.add_argument(
+    "--edf",
+    dest="edf_path",
+    type=str,
+    required=True,
+    help="Ruta al archivo EDF que se transmitirá por UDP."
+)
+
+parser.add_argument(
+    "--type",
+    dest="task_type",
+    type=int,
+    choices=[1, 2], #1 serás de izquierda y derecha, 2 serás de manos y pies
+    default=1,
+    help="Tipo de paradigma: 1 = rest/left/right, 2 = rest/hands/feet."
+)
+
+args = parser.parse_args()
+
+EDF_PATH = args.edf_path
+task_type = args.task_type
+
+if task_type == 1:
     event_map = {
-    "T0": "rest",
-    "T1": "left",
-    "T2": "right"
-}
+        "T0": "rest",
+        "T1": "left",
+        "T2": "right"
+    }
 else:
     event_map = {
-    "T0": "rest",
-    "T1": "hands",
-    "T2": "feet"
-}
-    
+        "T0": "rest",
+        "T1": "hands",
+        "T2": "feet"
+    }
+
+ch_number = 7
+
 
 #Todo lo relacionado al stream 
 
@@ -59,7 +87,11 @@ raw = mne.io.read_raw_edf(
 )
 #Seleccionamos canales de interés
 
-channels = ["C3..", "C4..", "Cz.."] #Esto se va a poder seleccionar en el futuro en la GUI
+if ch_number == 7:
+
+    channels = ['C5..', 'C3..', 'C1..', 'Cz..', 'C2..', 'C4..', 'C6..'] #Esto se va a poder seleccionar en el futuro en la GUI      
+elif ch_number ==3: 
+    channels = ['C3..','C4..','Cz..']
 available_channels = raw.ch_names #Validamos que existan en el archivo
 
 for channel in channels:

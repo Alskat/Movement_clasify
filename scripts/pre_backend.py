@@ -14,8 +14,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 class EEGPreprocess: 
 
-    def __init__(self, channels = None, l_freq = 8, h_freq = 30.0, use_notch = True, notch_freqs = (50,), window_size = 1.0, window_step = 0.5,
-                new_freq = None, tmin = 0.5, tmax =3.5, Debug = False, path = None, config = None):
+    def __init__(self, channels = None, l_freq = 8, h_freq = 30.0, use_notch = True, notch_freqs = (60,), window_size = 1.0, window_step = 0.5,
+                new_freq = None, tmin = 0.5, tmax =3.5, Debug = False, path = None, config = None, Fs = None):
 
         #Parámetros de salida de nuestro array:
         self.X = None
@@ -24,6 +24,7 @@ class EEGPreprocess:
         self.name = None
         self.run = None #Sección del sujeto
         self.trial = None #ID de la partición de la prueba}
+        self.mode = None #Modo de la prueba (LR_M, LR_I, etc.)
 
         #Parámetros de entrada
 
@@ -39,6 +40,7 @@ class EEGPreprocess:
         self.window_step = window_step
         self.Debug = Debug
         self.notch_freqs = notch_freqs
+        self.Fs = Fs
 
         self.dropout_df = None
 
@@ -280,10 +282,28 @@ class EEGPreprocess:
     
     def build(self, array: List[dict], Debug = False, reasons_only = False,
                show_dropouts = 0, dropout_rate = 150e-6, dropout = True,
-               save_df=True, channels = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
+               save_df=True, channels = None,
+               l_freq = None, h_freq =None, use_notch = None, notch_freqs = None, #Ahora los nuevos parámetros en caso de que no se hayan declarado antes
+               window_size = None, window_step = None, tmin = None, tmax = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
         
-        if self.channels is None:
+        if self.channels is None: #Nuevas declaraciones en caso de que no se bhyaan declarado en el init
             self.channels = channels 
+        if l_freq is not None:
+            self.l_freq = l_freq
+        if h_freq is not None:
+            self.h_freq = h_freq
+        if use_notch is not None:
+            self.use_notch = use_notch
+        if notch_freqs is not None:
+            self.notch_freqs = notch_freqs
+        if window_size is not None:
+            self.windows = window_size
+        if window_step is not None:
+            self.window_step = window_step
+        if tmin is not None:
+            self.tmin = tmin
+        if tmax is not None:
+            self.tmax = tmax
         
 
         X_list = [] #Lista para guardar los datos de cada archivo
@@ -291,8 +311,10 @@ class EEGPreprocess:
         sub_list = [] #Lista para guardar el ID del sujeto de cada archivo
         run_list = [] #Lista para guardar la sección del sujeto de cada archivo
         trial_list = [] #Lista para guardar el ID de la partición de la prueba de cada archivo
+        mode_list = [] #Lista para guardar el modo de la prueba de cada archivo
 
         global_trial_offset = 0
+        fit_Fs = 0
 
         if Debug:
             print(f"📂 Procesando {len(array)} archivos...")
@@ -326,9 +348,27 @@ class EEGPreprocess:
             
             raw = self._load_raw(path)
 
+            if self.Fs is None and fit_Fs == 0: 
+                self.Fs = raw.info['sfreq'] #Tomamos la Fs del primer archivo que cargamos y no lo volvemos a tocar 
+                fit_Fs = 1 #No volvemos a tocar la Fs
+                if Debug:
+                    print(f"Frecuencia de muestreo establecida en {self.Fs} Hz a partir del primer archivo cargado.")
+            
+            if self.Fs is not None and raw.info['sfreq'] != self.Fs:
+
+                print(f"⚠️ Advertencia: Archivo {path} tiene frecuencia de muestreo {raw.info['sfreq']} Hz, pero se esperaba {self.Fs} Hz. Se realizará resampleo.")
+                raw.resample(self.Fs, verbose='ERROR')
+                if Debug:
+                    print(f"Archivo {path} resampleado a {raw.info['sfreq']} Hz.")
+
+
             #2) Obtener labels y demás metadatos
 
-            labels, mode, event_map = self._get_labels(event_id, Debug = Debug) #Genial! ya tenemos etiquetas y el raw! vamos con lo siguiente:}
+            labels, mode, event_map = self._get_labels(event_id, Debug = Debug) #Genial! ya tenemos etiquetas y el raw! vamos con lo siguiente:
+            if Debug:
+                print(f"Etiquetas obtenidas: {labels}")
+                print(f"Modo de la prueba: {mode}")
+                print(f"Mapeo de eventos: {event_map}")
 
             #3) Preprocesar el raw 
 
@@ -393,10 +433,14 @@ class EEGPreprocess:
             sub_list.append(sub)
             run_list.append(run)
             trial_list.append(trial_file)
+            mode_arr = np.full(len(y), mode)    
+            mode_list.append(mode_arr)
+            if Debug: 
+                print("===================")
 
-            assert len(X_list) == len(y_list) == len(sub_list) == len(run_list) == len(trial_list), "Inconsistencia en la longitud de las listas acumuladoras!"
+            assert len(X_list) == len(y_list) == len(sub_list) == len(run_list) == len(trial_list) == len(mode_list), "Inconsistencia en la longitud de las listas acumuladoras!"
 
-        self.X, self.y, self.sub, self.run, self.trial = self._stack(X_list, y_list, sub_list, run_list, trial_list)
+        self.X, self.y, self.sub, self.run, self.trial, self.mode = self._stack(X_list, y_list, sub_list, run_list, trial_list, mode_list)
 
         assert len(self.X) == len(self.y) == len(self.sub) == len(self.run) == len(self.trial), "Inconsistencia en la longitud de los arrays finales después del stack!"
         
@@ -766,7 +810,7 @@ class EEGPreprocess:
 
             print(f"N epochs: {len(epochs)}")
 
-            print("====================================")
+            
 
         return epochs
     
@@ -793,12 +837,15 @@ class EEGPreprocess:
             Etiquetas por ventana, shape (N_ventanas_totales,).
         """
 
-            # --- Datos base ---
+        #Datos base 
         X = epochs.get_data() #Obtiene todos los datos 
         y_ids = epochs.events[:, 2] #Obtiene los eventos 
         sfreq = epochs.info['sfreq']
+        
 
         n_epochs, n_channels, n_times = X.shape
+
+        
 
         #Sacar las clases
 
@@ -817,8 +864,7 @@ class EEGPreprocess:
         win_samp  = int(round(size  * sfreq))
         step_samp = int(round(step * sfreq))
 
-
-
+        
 
         if win_samp > n_times:
             raise ValueError(f"La ventana ({win_samp} muestras) es más larga que el epoch ({n_times}).")
@@ -856,7 +902,7 @@ class EEGPreprocess:
         return X_windows, y_windows, trial_local
     
     def _stack(self, X_list: List[np.ndarray],
-                y_list: List[np.ndarray], sub_list: List[np.ndarray], run_list: List[np.ndarray], trial_list: List[np.ndarray]):
+                y_list: List[np.ndarray], sub_list: List[np.ndarray], run_list: List[np.ndarray], trial_list: List[np.ndarray], mode_list: List[np.ndarray]):
         """
         Apila tensores 3D ignorando entradas inválidas.
         
@@ -873,6 +919,7 @@ class EEGPreprocess:
         sub_ok = []
         run_ok = []
         trial_ok = []
+        mode_ok = []
 
         
         ref_shape = X_list[0].shape[1:]  # (C, T)
@@ -895,14 +942,16 @@ class EEGPreprocess:
             sub_ok.append(sub_list[i])
             run_ok.append(run_list[i])
             trial_ok.append(trial_list[i])
+            mode_ok.append(mode_list[i])
 
         X = np.concatenate(X_ok, axis=0)
         y = np.concatenate(y_ok, axis=0)
         sub = np.concatenate(sub_ok, axis=0)
         run = np.concatenate(run_ok, axis=0)
         trial = np.concatenate(trial_ok, axis=0)
+        mode = np.concatenate(mode_ok, axis=0)
 
-        return X, y, sub, run, trial
+        return X, y, sub, run, trial, mode
 
 
     def _idx(self, y: np.ndarray) -> None:
@@ -1080,6 +1129,7 @@ class EEGPreprocess:
             window_step=np.array([self.window_step], dtype=np.float32),
             tmin=np.array([self.tmin], dtype=np.float32),
             tmax=np.array([self.tmax], dtype=np.float32),
+            mode = np.array(self.mode, dtype=str)
         )
 
         print(f"✔️ Dataset {name} guardado en: {path}!")

@@ -256,13 +256,13 @@ class Preprocessor:
                 window = window[np.newaxis, :, :, np.newaxis]
                 prediction = self.aux_model.predict(window, verbose=0)  
 
-                predicted_class = np.argmax(
+                aux_predicted_class = np.argmax(
                 prediction,
                 axis=1
                 )[0]
-                
+                predicted_class = aux_predicted_class + 1
 
-                predicted_name = self.class_names[predicted_class + 1]
+                predicted_name = self.class_names[predicted_class]
 
                 confidence = np.max(prediction)
         return predicted_class, predicted_name, confidence, prediction

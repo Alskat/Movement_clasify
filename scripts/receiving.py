@@ -4,6 +4,84 @@ import numpy as np
 import time
 from preprocess import Preprocessor, resumir_ventanas
 
+import argparse
+
+parser = argparse.ArgumentParser(
+    description="Receiver pseudo-online para clasificación EEG con EEGNet."
+)
+
+
+
+parser.add_argument( #Modelo principal el cual puede ser el triclase o binario
+    "--model",
+    dest="model_path",
+    type=str,
+    required=True,
+    help="Ruta al modelo principal .keras."
+)
+
+parser.add_argument( #Modelo auxiliar el cual es solamente binario sin rest
+    "--aux-model",
+    dest="aux_model_path",
+    type=str,
+    default=None,
+    help="Ruta al modelo auxiliar .keras cuando se usa jerarquía binaria."
+)
+
+parser.add_argument( #Permite activar la jerarquía binaria
+    "--use-bin",
+    dest="use_bin",
+    action="store_true",
+    help="Activa la clasificación mediante jerarquía binaria."
+)
+
+slide_group = parser.add_mutually_exclusive_group()
+
+slide_group.add_argument(
+    "--slide",
+    dest="slide",
+    action="store_true",
+    help="Activa ventana deslizante con hop de 0.5 segundos."
+)
+
+slide_group.add_argument(
+    "--no-slide",
+    dest="slide",
+    action="store_false",
+    help="Desactiva ventana deslizante; usa ventanas consecutivas de 1 segundo."
+)
+
+parser.set_defaults(slide=True)
+
+args = parser.parse_args()
+
+model_path = args.model_path
+aux_model_path = args.aux_model_path
+use_bin = args.use_bin
+slide = args.slide
+
+
+# Validación mínima para jerarquía binaria
+if use_bin and aux_model_path is None:
+    parser.error(
+        "Si activas --use-bin, debes proporcionar también --aux-model."
+    )
+
+
+print(f"[RECEIVER] Modelo principal: {model_path}")
+
+if use_bin:
+    print("[RECEIVER] Modo: jerarquía binaria")
+    print(f"[RECEIVER] Modelo auxiliar: {aux_model_path}")
+else:
+    print("[RECEIVER] Modo: clasificación triclase")
+
+print(
+    "[RECEIVER] Slide/hop: "
+    + ("activo, hop de 0.5 s" if slide else "inactivo, hop de 1.0 s")
+)
+
+#Variables fijas
 HOST = "127.0.0.1"
 
 STREAM_PORT = 5005
@@ -34,6 +112,8 @@ sock_control.sendto(
 
 print("[RECEIVER] Esperando stream...\n")
 
+#Variables dinámicas
+
 buffer = []
 
 buffer_count = 1
@@ -44,18 +124,6 @@ last_packet_time = time.time()
 
 last_idx = -1
 
-current_event = None
-
-slide = True
-
-
-
-#Paths de los modelos y métricas 
-
-model_path = "Recursos/models/fined/v2/8_mode_bin_model_v1/EEGNet_LR3_subject07_ft_v1.keras"
-aux_model_path = "Recursos/models/fined/v2/12_mode_id_f_model_v1/EEGNet_LR3_subject07_ft_v1.keras"
-
-#Para comprobar el accuracy de nuestras predicciones: 
 
 y_true_stable = []
 y_pred_stable = []
@@ -125,8 +193,8 @@ try:
                 current_Fs = fs,
                 current_duration = 1.0,
                 model_path = model_path,
-                aux_path = aux_model_path,
-                use_bin = True
+                aux_path = aux_model_path if use_bin else None,
+                use_bin = use_bin
             )
         
         elif packet["type"] == "EVENT":
@@ -173,12 +241,18 @@ try:
                 )
 
                 
-
-                print(
-                    f"[WINDOW] "
-                    f"{buffer_count} / {duration*2} | "
-                    f"shape={window.shape}"
-                )
+                if slide: 
+                    print(
+                        f"[WINDOW] "
+                        f"{buffer_count} / {duration*2} | "
+                        f"shape={window.shape}"
+                    )
+                else: 
+                    print(
+                        f"[WINDOW] "
+                        f"{buffer_count} / {duration} | "
+                        f"shape={window.shape}"
+                    )
 
                 #preprocesamos la ventana
 
@@ -193,7 +267,7 @@ try:
                 y_pred_stable.append(predicted_name)
 
                 #print(f"Dimensiones de la ventana preprocesada: {result['window'].shape}")
-                print(f"Predicción: clase={result['predicted_name']} | confidence={result['confidence']:.4f} |{result['processing_time_ms']:.2f} ms) ")
+                print(f"Predicción: clase={result['predicted_name']} | confidence={result['confidence']:.4f} |{result['processing_time_ms']:.2f} ms ")
                 if result['predicted_name'] == current_event:
                     print(f"✅Predicción coincide con el evento actual")
                 else:
@@ -218,7 +292,7 @@ finally:
         (HOST, CONTROL_PORT)
     )
 
-    print("[RECEIVER] Señal STOP enviada al streamer.")
+
 
     resumir_ventanas(
         y_true_stable,
@@ -232,4 +306,3 @@ finally:
 
     print("[RECEIVER] Receiver finalizado.")
 
-print("\n[RECEIVER] Receiver finalizado.")
