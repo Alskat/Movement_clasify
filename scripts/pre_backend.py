@@ -355,8 +355,9 @@ class EEGPreprocess:
                     print(f"Frecuencia de muestreo establecida en {self.Fs} Hz a partir del primer archivo cargado.")
             
             if self.Fs is not None and raw.info['sfreq'] != self.Fs:
-
-                print(f"⚠️ Advertencia: Archivo {path} tiene frecuencia de muestreo {raw.info['sfreq']} Hz, pero se esperaba {self.Fs} Hz. Se realizará resampleo.")
+                
+                if Debug:
+                    print(f"⚠️ Advertencia: Archivo {path} tiene frecuencia de muestreo {raw.info['sfreq']} Hz, pero se esperaba {self.Fs} Hz. Se realizará resampleo.")
                 raw.resample(self.Fs, verbose='ERROR')
                 if Debug:
                     print(f"Archivo {path} resampleado a {raw.info['sfreq']} Hz.")
@@ -442,7 +443,7 @@ class EEGPreprocess:
 
         self.X, self.y, self.sub, self.run, self.trial, self.mode = self._stack(X_list, y_list, sub_list, run_list, trial_list, mode_list)
 
-        assert len(self.X) == len(self.y) == len(self.sub) == len(self.run) == len(self.trial), "Inconsistencia en la longitud de los arrays finales después del stack!"
+        assert len(self.X) == len(self.y) == len(self.sub) == len(self.run) == len(self.trial) == len(self.mode), "Inconsistencia en la longitud de los arrays finales después del stack!"
         
 
         if show_dropouts > 0:

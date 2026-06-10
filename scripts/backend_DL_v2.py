@@ -2,8 +2,6 @@
 
 #Primero, importamos todas las librerías que ya teníamos antes 
 #Clásicas
-from pdb import run
-from turtle import mode
 
 import numpy as np
 import pandas as pd
@@ -179,7 +177,22 @@ class Selection:
             # 🔹 IZQ-DER-MANO-PIES MOTORAS 
 
             15: dict(pick=[5,6,7,8], fusionar=False, binary=False,
-                     allowed_modes = ["LR_M", "HF_M"])
+                     allowed_modes = ["LR_M", "HF_M"]),
+
+            # 🔹 REST-IZQ-DER IMAGINARIAS
+
+            16: dict(pick=[0,1,2], fusionar=False, binary=False,
+                     allowed_modes = ["LR_I"]), 
+
+            # 🔹 REST-MANOS-PIES IMAGINARIAS
+
+            17: dict(pick=[0,3,4], fusionar=False, binary=False,
+                     allowed_modes = ["HF_I"]),
+
+            # 🔹 REST-RIGHT-FEET (moabb)
+
+            18: dict(pick = [0, 1, 4], fusionar = False, binary = False,
+                    allowed_modes = ["LR_I", "HF_I"])
 
         }
 
@@ -268,12 +281,12 @@ class Selection:
 
         assert len(self.X) == len(self.y) == len(self.sub) == len(self.trial) == len(self.run) == len(self.mode), "Inconsistencia en la longitud de los arrays finales!"
     
-    def pick_fine(self, subject_id, test_run=None, run_split=False):
+    def pick_fine(self, subject_id, test_run=None, run_split=False, run_fold = False):
 
         mask_model = self.sub != subject_id
         mask_fine  = self.sub == subject_id
 
-
+        #1) Parte: Splits de entrenamiento general y fine-tune
         data_model = {
             "X": self.X[mask_model],
             "y": self.y[mask_model],
@@ -283,7 +296,7 @@ class Selection:
             "mode": self.mode[mask_model]
         }
 
-        data_fine = {
+        data_fine_full = {
             "X": self.X[mask_fine],
             "y": self.y[mask_fine],
             "sub": self.sub[mask_fine],
@@ -293,77 +306,168 @@ class Selection:
         }
 
         self.data_model = EEGSubset(data_model)
-        self.data_fine = EEGSubset(data_fine)
+        self.data_fine = EEGSubset(data_fine_full)
 
         self.fine_subject = subject_id
 
-        if not run_split:
+
+        #=================================================
+        #Caso 1: no separar por run: Retornamos todo nomás
+        #=====================================================
+        if not run_split and not run_fold:
 
             if self.Debug:
-                print(f"✔ Sujetos entrenamiento: {np.unique(data_model['sub'])}")
+                print(f"✔ Sujetos entrenamiento general: {np.unique(data_model['sub'])}")
                 print(f"✔ Sujeto fine-tune: {subject_id}")
                 print(f"Shape modelo: {data_model['X'].shape}")
-                print(f"Shape fine: {data_fine['X'].shape}")
+                print(f"Shape fine: {data_fine_full['X'].shape}")
+                print(f"Runs fine disponibles: {np.unique(data_fine_full['run'])}")
 
             return self.data_model, self.data_fine, None
 
-        else: 
-            #Vamos a escoger un único run para el test
-            unique_runs = np.unique(data_fine["run"])
-            if len(unique_runs) < 2:
-                raise ValueError(
-                    f"El sujeto {subject_id} tiene menos de 2 runs. "
-                    "No se puede separar fine-tuning y test por run."
-                )
-            if test_run is None:
-                test_run = unique_runs[0]  #Elegimos el primer run como test por defecto
+        #=====================================================
+        #Validaar que hayan suficientes runs
+        #=================================================
+        unique_runs = np.unique(data_fine_full["run"])
 
-            if test_run not in unique_runs:
-                raise ValueError(
-                    f"test_run={test_run} no existe para el sujeto {subject_id}. "
-                    f"Runs disponibles: {unique_runs}"
-                )
-            mask_test = data_fine["run"] == test_run
-            mask_fine_train = ~mask_test
-            
-            data_fine_train = {
-                "X": data_fine["X"][mask_fine_train],
-                "y": data_fine["y"][mask_fine_train],
-                "sub": data_fine["sub"][mask_fine_train],
-                "trial": data_fine["trial"][mask_fine_train],
-                "run": data_fine["run"][mask_fine_train],
-                "mode": data_fine["mode"][mask_fine_train]
-}
-            data_test = {
-                "X": data_fine["X"][mask_test],
-                "y": data_fine["y"][mask_test],
-                "sub": data_fine["sub"][mask_test],
-                "trial": data_fine["trial"][mask_test],
-                "run": data_fine["run"][mask_test],
-                "mode": data_fine["mode"][mask_test]}
-            
-            
+        if len(unique_runs) < 2:
+            raise ValueError(
+                f"El sujeto {subject_id} tiene menos de 2 runs. "
+                "No se puede separar fine-tuning y test por run."
+            )
 
-            self.data_model = EEGSubset(data_model)
-            self.data_fine = EEGSubset(data_fine_train)
-            self.data_test = EEGSubset(data_test)
+        #=====================================================
+        #Caso 2: leave-one-run-out / run-fold
+        #=====================================================
+        if run_fold: #Creamos una lista con las diferentes probabilidades de folds
 
-            self.fine_subject = subject_id
-            self.test_run = test_run
+            data_fine_folds = []
+            data_test_folds = []
+            fold_info = []
+
+            for current_test_run in unique_runs:
+
+                mask_test = data_fine_full["run"] == current_test_run
+                mask_fine_train = ~mask_test
+
+                data_fine_train = {
+                    "X": data_fine_full["X"][mask_fine_train],
+                    "y": data_fine_full["y"][mask_fine_train],
+                    "sub": data_fine_full["sub"][mask_fine_train],
+                    "trial": data_fine_full["trial"][mask_fine_train],
+                    "run": data_fine_full["run"][mask_fine_train],
+                    "mode": data_fine_full["mode"][mask_fine_train]
+                }
+
+                data_test = {
+                    "X": data_fine_full["X"][mask_test],
+                    "y": data_fine_full["y"][mask_test],
+                    "sub": data_fine_full["sub"][mask_test],
+                    "trial": data_fine_full["trial"][mask_test],
+                    "run": data_fine_full["run"][mask_test],
+                    "mode": data_fine_full["mode"][mask_test]
+                }
+
+                fine_subset = EEGSubset(data_fine_train)
+                test_subset = EEGSubset(data_test)
+
+                # Seguridad anti-leakage
+                overlap = np.intersect1d(fine_subset.run, test_subset.run)
+                if len(overlap) > 0:
+                    raise RuntimeError(
+                        f"Leakage detectado en fold con test_run={current_test_run}. "
+                        f"Runs compartidas: {overlap}"
+                    )
+                
+
+                #Guardamos los datos en la lista
+                data_fine_folds.append(fine_subset)
+                data_test_folds.append(test_subset)
+
+                fold_info.append({
+                    "test_run": current_test_run,
+                    "fine_runs": np.unique(fine_subset.run),
+                    "test_runs": np.unique(test_subset.run),
+                    "n_fine": len(fine_subset.y),
+                    "n_test": len(test_subset.y)
+                })
+
+            self.data_fine_folds = data_fine_folds
+            self.data_test_folds = data_test_folds
+            self.fold_info = fold_info
+            print(f"cantidad total de folds: {len(data_fine_folds)}")
 
             if self.Debug:
-                print(f"✔ Sujetos entrenamiento general: {np.unique(self.data_model.sub)}")
-                print(f"✔ Sujeto fine-tune: {subject_id}")
-                print(f"✔ Run reservada para test: {test_run}")
-                print(f"Runs fine-tune:", np.unique(self.data_fine.run))
-                print(f"Runs test:", np.unique(self.data_test.run))
-                print(f"Shape modelo: {self.data_model.X.shape}")
-                print(f"Shape fine: {self.data_fine.X.shape}")
-                print(f"Shape test: {self.data_test.X.shape}")
+                print(f"✔ Run-fold activado para sujeto {subject_id}")
+                print(f"Runs disponibles: {unique_runs}")
+                print(f"Número de folds: {len(data_fine_folds)}")
 
-      
+                for i, info in enumerate(fold_info):
+                    print("\n" + "-" * 40)
+                    print(f"Fold {i}")
+                    print(f"Run test: {info['test_run']}")
+                    print(f"Runs fine: {info['fine_runs']}")
+                    print(f"Runs test: {info['test_runs']}")
+                    print(f"Shape fine: {data_fine_folds[i].X.shape}")
+                    print(f"Shape test: {data_test_folds[i].X.shape}")
 
-            return self.data_model, self.data_fine, self.data_test
+            return self.data_model, data_fine_folds, data_test_folds
+
+        # =====================================================
+        # Caso 3: run_split clásico con una sola run de test
+        # =====================================================
+        if test_run is None:
+            test_run = unique_runs[0]
+
+        if test_run not in unique_runs:
+            raise ValueError(
+                f"test_run={test_run} no existe para el sujeto {subject_id}. "
+                f"Runs disponibles: {unique_runs}"
+            )
+
+        mask_test = data_fine_full["run"] == test_run
+        mask_fine_train = ~mask_test
+
+        data_fine_train = {
+            "X": data_fine_full["X"][mask_fine_train],
+            "y": data_fine_full["y"][mask_fine_train],
+            "sub": data_fine_full["sub"][mask_fine_train],
+            "trial": data_fine_full["trial"][mask_fine_train],
+            "run": data_fine_full["run"][mask_fine_train],
+            "mode": data_fine_full["mode"][mask_fine_train]
+        }
+
+        data_test = {
+            "X": data_fine_full["X"][mask_test],
+            "y": data_fine_full["y"][mask_test],
+            "sub": data_fine_full["sub"][mask_test],
+            "trial": data_fine_full["trial"][mask_test],
+            "run": data_fine_full["run"][mask_test],
+            "mode": data_fine_full["mode"][mask_test]
+        }
+
+        self.data_fine = EEGSubset(data_fine_train)
+        self.data_test = EEGSubset(data_test)
+        self.test_run = test_run
+
+        # Seguridad anti-leakage
+        overlap = np.intersect1d(self.data_fine.run, self.data_test.run)
+        if len(overlap) > 0:
+            raise RuntimeError(
+                f"Leakage detectado. Runs compartidas entre fine y test: {overlap}"
+            )
+
+        if self.Debug:
+            print(f"✔ Sujetos entrenamiento general: {np.unique(self.data_model.sub)}")
+            print(f"✔ Sujeto fine-tune: {subject_id}")
+            print(f"✔ Run reservada para test: {test_run}")
+            print(f"Runs fine-tune: {np.unique(self.data_fine.run)}")
+            print(f"Runs test: {np.unique(self.data_test.run)}")
+            print(f"Shape modelo: {self.data_model.X.shape}")
+            print(f"Shape fine: {self.data_fine.X.shape}")
+            print(f"Shape test: {self.data_test.X.shape}")
+
+        return self.data_model, self.data_fine, self.data_test
     
     def resume_dataset(self, subs=False):
         print("\n" + "="*50)
@@ -465,7 +569,7 @@ class Selection:
             print(f"✔ Canales seleccionados: {self.channels_names}")
             print(f"Nuevo shape X: {self.X.shape}")
             
-    def pipeline(self, n=None, undersample_rest=None, binary = False):
+    def pipeline(self, n=None, binary = False):
         #El pipeline principal consiste en aplicar un pick y luego una fusión, cosas que ya tenemos en otras clases 
         #n sólo es para limitar la cantidad de datos totales, no recuerdo porque lo quise añadir pero ahí está
         if self.binary is not None:
@@ -969,74 +1073,391 @@ def build_eegnet(classes, chans, signal_len,
     )
     return model
 
-def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1, classes=None, epochs=20, 
-              debug=False, use_class_weight=True, sfreq=160, kern_length=None, F1 = 8, make_test=False, batch = 16,
-              undersample_rest=False, test_run=None, checkpoint_path = None,
-              Lr =1e-3, dynamic_lr = False, Lr_grid = None, patience_level = "medium", monitor = "val_loss", dropout_rate=0.5):
+def runfolds(
+    fine_obj,
+    test_obj,
+    subjects=None,
+    n_subjects=None,
+    seed=42,
+    min_runs=2,
+    debug=True
+):
+    """
+    Construye folds leave-one-run-out para sujetos holdout.
+
+    fine_obj:
+        Objeto Selection ya cargado y pasado por pipeline().
+        Debe contener datos limpios/con dropbad para fine-tuning.
+
+    test_obj:
+        Objeto Selection ya cargado y pasado por pipeline().
+        Debe contener datos realistas/sin dropbad para evaluación final.
+
+    subjects:
+        Lista de sujetos a evaluar. Si es None, se usan sujetos comunes
+        entre fine_obj y test_obj. Si n_subjects no es None, se eligen
+        aleatoriamente con seed.
+
+    Retorna:
+        data_fine_folds : lista de EEGSubset
+        data_test_folds : lista de EEGSubset
+        fold_table      : DataFrame con metadata de cada fold
+    """
+
+
+
+    # -------------------------------------------------
+    # 0) Validaciones  (Lo pidió la IA)
+    # -------------------------------------------------
+    required_attrs = ["X", "y", "sub", "trial", "run", "mode"]
+
+    for attr in required_attrs:
+        if not hasattr(fine_obj, attr):
+            raise ValueError(f"fine_obj no tiene atributo {attr}")
+        if not hasattr(test_obj, attr):
+            raise ValueError(f"test_obj no tiene atributo {attr}")
+
+    if fine_obj.X is None or test_obj.X is None:
+        raise ValueError("fine_obj y test_obj deben estar cargados y procesados con pipeline().")
+
+    # Validación de clases
+    if hasattr(fine_obj, "label_map") and hasattr(test_obj, "label_map"):
+        if fine_obj.label_map != test_obj.label_map:
+            raise ValueError(
+                "fine_obj y test_obj tienen label_map distintos. "
+                f"fine: {fine_obj.label_map} | test: {test_obj.label_map}"
+            )
+
+    # Validación de shape de canales/tiempo
+    if fine_obj.X.shape[1:] != test_obj.X.shape[1:]:
+        raise ValueError(
+            "fine_obj y test_obj tienen distinta forma de ventana. "
+            f"fine: {fine_obj.X.shape[1:]} | test: {test_obj.X.shape[1:]}"
+        )
+
+    #1) Elegimos los sujetos comunes (Deberían ser todos!)
+    fine_subjects = np.unique(fine_obj.sub)
+    test_subjects = np.unique(test_obj.sub)
+
+    common_subjects = np.intersect1d(fine_subjects, test_subjects)
+
+
     
-    #0) Definir variables
-    monitor_mode = "min" if monitor.endswith("loss") else "max"
+
+    if subjects is None:
+        subjects = common_subjects
+
+        if n_subjects is not None:
+            if n_subjects > len(common_subjects):
+                raise ValueError(
+                    f"n_subjects={n_subjects} excede sujetos comunes disponibles: "
+                    f"{len(common_subjects)}"
+                )
+
+            rng = np.random.default_rng(seed)
+            subjects = rng.choice(common_subjects, size=n_subjects, replace=False)
+
+    subjects = np.asarray(subjects)
+
+    missing = [s for s in subjects if s not in common_subjects]
+    if missing:
+        raise ValueError(
+            f"Estos sujetos no existen en ambos objetos fine/test: {missing}. "
+            f"Sujetos comunes: {common_subjects}"
+        )
+
+ 
+
+    # -------------------------------------------------
+    # Helper interno
+    # -------------------------------------------------
+    def make_subset(obj, mask):
+        data = {
+            "X": obj.X[mask],
+            "y": obj.y[mask],
+            "sub": obj.sub[mask],
+            "trial": obj.trial[mask],
+            "run": obj.run[mask],
+            "mode": obj.mode[mask]
+        }
+        return EEGSubset(data)
+
+    #2) Construimos los 2 folds
+    data_fine_folds = [] #Contiene todos los runs de fine-tuning
+    data_test_folds = [] #Contiene los runs del test (uno del run-folds)
+    rows = []
+
+    fold_id = 0
+
+    for subject in subjects: #Lo vamos a hacer con cada sujeto de la lista
+
+        fine_mask_subject = fine_obj.sub == subject
+        test_mask_subject = test_obj.sub == subject
+
+        fine_runs = np.unique(fine_obj.run[fine_mask_subject])
+        test_runs = np.unique(test_obj.run[test_mask_subject])
+
+        common_runs = np.intersect1d(fine_runs, test_runs)
+
+        if len(common_runs) < min_runs:
+            if debug:
+                print(
+                    f"⚠ Sujeto {subject} omitido: solo tiene {len(common_runs)} runs comunes "
+                    f"entre fine y test. Runs comunes: {common_runs}"
+                )
+            continue
+
+        for current_test_run in common_runs:
+
+            # Fine-tuning: sujeto actual, todas las runs excepto current_test_run
+            mask_fine = (
+                (fine_obj.sub == subject) &
+                (fine_obj.run != current_test_run)
+            )
+
+            # Test: sujeto actual, solo current_test_run, desde test_obj realista
+            mask_test = (
+                (test_obj.sub == subject) &
+                (test_obj.run == current_test_run)
+            )
+
+            fine_subset = make_subset(fine_obj, mask_fine)
+            test_subset = make_subset(test_obj, mask_test)
+
+            if len(fine_subset.y) == 0:
+                raise RuntimeError(
+                    f"Fold inválido: sujeto {subject}, test_run {current_test_run}, "
+                    "fine_subset quedó vacío."
+                )
+
+            if len(test_subset.y) == 0:
+                raise RuntimeError(
+                    f"Fold inválido: sujeto {subject}, test_run {current_test_run}, "
+                    "test_subset quedó vacío."
+                )
+
+            # Seguridad anti-leakage por run dentro del mismo sujeto
+            overlap_runs = np.intersect1d(
+                np.unique(fine_subset.run),
+                np.unique(test_subset.run)
+            )
+
+            if len(overlap_runs) > 0:
+                raise RuntimeError(
+                    f"Leakage detectado en fold {fold_id}. "
+                    f"Sujeto {subject}, runs compartidas: {overlap_runs}"
+                )
+
+            # Seguridad: el sujeto debe ser el mismo en fine y test
+            if len(np.unique(fine_subset.sub)) != 1 or len(np.unique(test_subset.sub)) != 1:
+                raise RuntimeError(f"Fold {fold_id} contiene más de un sujeto.")
+
+            if np.unique(fine_subset.sub)[0] != np.unique(test_subset.sub)[0]:
+                raise RuntimeError(f"Fold {fold_id}: sujeto fine y sujeto test no coinciden.")
+
+            data_fine_folds.append(fine_subset)
+            data_test_folds.append(test_subset)
+
+            rows.append({
+                "fold": fold_id,
+                "subject": int(subject),
+                "test_run": int(current_test_run),
+                "fine_runs": str(list(np.unique(fine_subset.run))),
+                "test_runs": str(list(np.unique(test_subset.run))),
+                "n_fine": len(fine_subset.y),
+                "n_test": len(test_subset.y),
+                "fine_class_counts": str(dict(zip(*np.unique(fine_subset.y, return_counts=True)))),
+                "test_class_counts": str(dict(zip(*np.unique(test_subset.y, return_counts=True)))),
+                "fine_modes": str(list(np.unique(fine_subset.mode))),
+                "test_modes": str(list(np.unique(test_subset.mode))),
+            })
+
+            fold_id += 1
+
+    fold_table = pd.DataFrame(rows)
+
+    if len(data_fine_folds) == 0:
+        raise ValueError("No se construyó ningún fold válido.")
+
     if debug:
-        print("Iniciando pipeline de entrenamiento EEGNet...")  
+        print("\n" + "=" * 70)
+        print("RUN-FOLD HOLDOUT CONSTRUIDO")
+        print("=" * 70)
+        print(f"Sujetos solicitados: {subjects}")
+        print(f"Folds generados: {len(data_fine_folds)}")
+        print("\nResumen:")
+        print(fold_table[["fold", "subject", "test_run", "fine_runs", "n_fine", "n_test"]])
+
+    return data_fine_folds, data_test_folds, fold_table
+
+def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
+              classes=None, epochs=20,
+              debug=False, use_class_weight=True, sfreq=160,
+              kern_length=None, F1=8, make_test=False, batch=16,
+              undersample_rest=False, test_run=None, checkpoint_path=None,
+              Lr=1e-3, dynamic_lr=False, Lr_grid=None,
+              patience_level="medium", monitor="val_loss", dropout_rate=0.5,
+              apply_ea=False,    # NUEVO: EA por sujeto antes de normalizar
+              ea_eps=1e-3,       # NUEVO: regularización RELATIVA de eigenvalores
+              ):
+    """
+    Entrenamiento general de EEGNet.
+ 
+    Parámetros nuevos
+    -----------------
+    apply_ea : bool (default False)
+        Si True, aplica Euclidean Alignment (He & Wu 2019) a cada sujeto
+        del dataset de entrenamiento ANTES de normalizar. Cada sujeto
+        se alinea con su propia R^{-1/2} calculada sobre sus datos.
+ 
+        Esto es necesario para que el fine-tuning posterior con
+        apply_ea=True sea consistente: el modelo general aprende a
+        clasificar señales ya alineadas, y el fine-tuning le presenta
+        señales con la misma transformación.
+ 
+        Latencia online: 0 — R_invsqrt se guarda en calibración y se
+        aplica como multiplicación matricial antes de normalizar.
+ 
+    ea_eps : float
+        Umbral RELATIVO para eigenvalores de R: cualquier eigenvalor menor
+        a `eigvals.max() * ea_eps` se regulariza antes de invertir. Al ser
+        relativo, funciona sin importar la escala/unidades de la señal.
+    """
+ 
+    # ------------------------------------------------------------------
+    # Paso 0: variables (sin cambios)
+    # ------------------------------------------------------------------
+    monitor_mode = "min" if monitor.endswith("loss") else "max"
+ 
+    if debug:
+        print("Iniciando pipeline de entrenamiento EEGNet...")
         print(f"Split de test: {make_test}")
+ 
     if classes is None:
         classes = len(np.unique(data_obj.y))
-
-    if dynamic_lr and Lr_grid is None: 
-        
-        warnings.warn("dynamic_lr=True pero no se proporcionó Lr_grid. Se usará un schedule por defecto.")
-
-
-    #1 Split 
-    split, info = split_eeg(data_obj, mode = mode, test_size=test_size, val_size=val_size, debug=debug, make_test=make_test)
-
-    #2 Normalización: importante sólo se normaliza X
-
+        if debug:
+            print(f"Clases detectadas automáticamente: {classes}")
+ 
+    if dynamic_lr and Lr_grid is None:
+        warnings.warn(
+            "dynamic_lr=True pero no se proporcionó Lr_grid. "
+            "Se usará un schedule por defecto."
+        )
+ 
+    # ------------------------------------------------------------------
+    # Paso 0.5 (NUEVO): EA por sujeto
+    # Se aplica sobre data_obj.X crudo, antes de split y normalización,
+    # para que channel_mean/channel_std se calculen sobre datos alineados.
+    # ------------------------------------------------------------------
+    if apply_ea:
+        if debug:
+            print("[EA] Aplicando Euclidean Alignment por sujeto...")
+ 
+        subjects = np.unique(data_obj.sub)
+        X_aligned = data_obj.X.copy()
+ 
+        n_ok  = 0
+        n_bad = 0
+ 
+        for subj in subjects:
+            mask = data_obj.sub == subj
+            X_subj = data_obj.X[mask]           # (N_subj, C, T) — crudo
+ 
+            try:
+                R_invsqrt, R = compute_ea_matrix(X_subj, eps=ea_eps, debug=False)
+                X_aligned[mask] = apply_ea_transform(X_subj, R_invsqrt)
+                n_ok += 1
+ 
+                if debug:
+                    print(f"  Sujeto {subj:03d}: traza R={np.trace(R):.2f} "
+                          f"| cond={np.linalg.cond(R):.1f}")
+ 
+            except Exception as e:
+                # Si un sujeto falla (señal degenerada), lo dejamos sin alinear
+                # y avisamos — no abortamos todo el entrenamiento
+                warnings.warn(
+                    f"[EA] Sujeto {subj} falló ({e}). "
+                    "Se usarán sus datos sin alinear."
+                )
+                n_bad += 1
+ 
+        # Reemplazar X en data_obj con versión alineada
+        # Usamos EEGSubset para no mutar el objeto original
+        data_obj = EEGSubset({
+            "X":     X_aligned,
+            "y":     data_obj.y,
+            "sub":   data_obj.sub,
+            "trial": data_obj.trial,
+            "run":   data_obj.run,
+            "mode":  data_obj.mode,
+        })
+ 
+        if debug:
+            print(f"[EA] Alineación completada: {n_ok} sujetos OK, {n_bad} fallidos.")
+ 
+    # ------------------------------------------------------------------
+    # Paso 1: split (sin cambios)
+    # ------------------------------------------------------------------
+    split, info = split_eeg(
+        data_obj, mode=mode,
+        test_size=test_size, val_size=val_size,
+        debug=debug, make_test=make_test
+    )
+ 
+    # ------------------------------------------------------------------
+    # Paso 2: normalización — opera sobre datos ya alineados si apply_ea
+    # channel_mean y channel_std serán consistentes con fine-tuning
+    # ------------------------------------------------------------------
     norm_split, channel_mean, channel_std = normalizar_split(split)
-
-    #3 Ajustar forma para Keras (Sólo X también)
-
+ 
+    # ------------------------------------------------------------------
+    # Paso 3: reshape Keras (sin cambios)
+    # ------------------------------------------------------------------
     keras_split = prepare_keras_split(norm_split)
-
-    if debug: 
-        print("Antes de ajustar:", split.X.train.shape, "Después de ajustar para Keras:", keras_split.X.train.shape)
-
-    #3.5 Undersampling de clase rest en caso de que se desee (Sólo para el train, no queremos tocar val ni test)
-
+ 
+    if debug:
+        print("Antes de ajustar:", split.X.train.shape,
+              "Después de ajustar para Keras:", keras_split.X.train.shape)
+ 
+    # ------------------------------------------------------------------
+    # Paso 3.5: undersampling (sin cambios)
+    # ------------------------------------------------------------------
     if undersample_rest:
         X_train, y_train, _, _, _, _ = apply_undersample_rest(keras_split)
-        
-    else: 
+    else:
         X_train = keras_split.X.train
-        y_train = keras_split.y.train #El resto ni los ocupamos 
-
+        y_train = keras_split.y.train
+ 
     if debug:
-        print("distribución de clases después de undersample rest:", dict(zip(*np.unique(y_train, return_counts=True))))
-
-
-
-    #4 Construir modelo EEGnet
-    chans = X_train.shape[1]
+        print("distribución de clases después de undersample rest:",
+              dict(zip(*np.unique(y_train, return_counts=True))))
+ 
+    # ------------------------------------------------------------------
+    # Paso 4: construir modelo (sin cambios)
+    # ------------------------------------------------------------------
+    chans      = X_train.shape[1]
     signal_len = X_train.shape[2]
-
+ 
     kern_length = int(sfreq // 2) if kern_length is None else kern_length
-    
-    modelo = build_eegnet(classes, chans, signal_len, kern_length=kern_length, F1=F1, dropout_rate=dropout_rate)
-
-    #5) Compilar el modelo
+ 
+    modelo = build_eegnet(
+        classes, chans, signal_len,
+        kern_length=kern_length, F1=F1, dropout_rate=dropout_rate
+    )
+ 
+    # ------------------------------------------------------------------
+    # Paso 5: compilar (sin cambios)
+    # ------------------------------------------------------------------
     modelo.compile(
         loss='sparse_categorical_crossentropy',
         optimizer=Adam(learning_rate=Lr),
         metrics=['accuracy']
     )
-
+ 
     callbacks = []
-
-    early_cfg = get_early_stopping_config(
-        level=patience_level,
-        monitor=monitor
-    )
-
+ 
+    early_cfg = get_early_stopping_config(level=patience_level, monitor=monitor)
+ 
     if early_cfg is not None:
         callbacks.append(
             EarlyStopping(
@@ -1044,123 +1465,136 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1, classes=Non
                 patience=early_cfg["patience"],
                 min_delta=early_cfg["min_delta"],
                 restore_best_weights=early_cfg["restore_best_weights"],
-                mode = monitor_mode
+                mode=monitor_mode,
             )
         )
+ 
     if checkpoint_path is None:
         checkpoint_path = "EEGNet_best.keras"
+ 
     ckpt_cb = ModelCheckpoint(
-    filepath=checkpoint_path,
-    monitor=monitor,
-    save_best_only=True,
-    mode=monitor_mode
-)
+        filepath=checkpoint_path,
+        monitor=monitor,
+        save_best_only=True,
+        mode=monitor_mode,
+    )
     callbacks.append(ckpt_cb)
-
-    
-    
-
+ 
     if dynamic_lr:
         if Lr_grid is None:
-            Lr_grid = [(0, Lr), (int(epochs * 0.3), Lr * 0.1), (int(epochs * 0.6), Lr * 0.01)]
-
+            Lr_grid = [
+                (0,                    Lr),
+                (int(epochs * 0.3),    Lr * 0.1),
+                (int(epochs * 0.6),    Lr * 0.01),
+            ]
         callbacks.append(
             LearningRateScheduler(
                 make_lr_scheduler(Lr_grid, verbose=debug),
-                verbose=0
+                verbose=0,
             )
         )
-
-    #6 Entrenar el modelo 
-
-    if debug:
-        verbose = 1
-    else:
-        verbose = 0
+ 
+    # ------------------------------------------------------------------
+    # Paso 6: entrenar (sin cambios)
+    # ------------------------------------------------------------------
+    verbose = 1 if debug else 0
+ 
     class_weight = None
     if use_class_weight:
         from sklearn.utils.class_weight import compute_class_weight
         classes_present = np.unique(y_train)
-        weights = compute_class_weight('balanced',
-                                       classes=classes_present,
-                                       y=y_train)
+        weights = compute_class_weight(
+            'balanced', classes=classes_present, y=y_train
+        )
         class_weight = dict(zip(classes_present, weights))
-
-
+ 
     history = modelo.fit(
         X_train, y_train,
         epochs=epochs,
-        batch_size=batch,          
+        batch_size=batch,
         validation_data=(keras_split.X.val, keras_split.y.val),
         callbacks=callbacks,
-        class_weight=class_weight, 
-        verbose=verbose
+        class_weight=class_weight,
+        verbose=verbose,
     )
-
-    
-
-    #7 Evaluar el modelo
-    #Si existe un subconjunto de test reservado, make_test = True
+ 
+    # ------------------------------------------------------------------
+    # Paso 7: evaluación (sin cambios)
+    # test_run ya viene alineado externamente si apply_ea=True en el
+    # notebook, o se evalúa con normalize_run igual que antes
+    # ------------------------------------------------------------------
+    test_run_sorted = None
+ 
     if make_test:
-
-        test_loss, test_acc = modelo.evaluate(keras_split.X.test, keras_split.y.test, verbose=0)
+        test_loss, test_acc = modelo.evaluate(
+            keras_split.X.test, keras_split.y.test, verbose=0
+        )
         print(f"Test loss={test_loss:.4f}, acc={test_acc:.4f}")
-
-    #Si no, pero le especificamos un test_run, entonces evaluamos en ese test_run (que se supone que es un run completo separado del train y val)
-    elif test_run is not None: 
-        #Normalizamos y ajustamos el test_run para Keras 
+ 
+    elif test_run is not None:
+        if not isinstance(test_run, (list, tuple)):
+            test_run = [test_run]
+ 
         if debug:
-            print(f"Test run reservado. Se realizará evaluación en el set de test.")
-            print(f"Antes de normalizar y ajustar, test_run.X shape: {test_run.X.shape}")
-
-        X_test = normalize_run(test_run, channel_mean, channel_std)
-
+            print(f"\n[8] Evaluando {len(test_run)} subsets de test_run...")
+ 
+        scored = []
+        for i, subset in enumerate(test_run):
+            X_rub_i = normalize_run(subset, channel_mean, channel_std)
+            y_rub_i = subset.y
+ 
+            loss_i, acc_i = modelo.evaluate(X_rub_i, y_rub_i, verbose=0)
+ 
+            unique_sub_i = np.unique(subset.sub)
+            unique_run_i = np.unique(subset.run)
+            sub_label = int(unique_sub_i[0]) if len(unique_sub_i) == 1 else list(unique_sub_i)
+            run_label = int(unique_run_i[0]) if len(unique_run_i) == 1 else list(unique_run_i)
+ 
+            if debug:
+                print(f"  subset[{i}] sub={sub_label} run={run_label} "
+                      f"| loss={loss_i:.4f}, acc={acc_i:.4f}")
+ 
+            scored.append((acc_i, subset))
+ 
+        scored.sort(key=lambda x: x[0], reverse=True)
+        test_run_sorted = [s for _, s in scored]
+ 
         if debug:
-            print(f"Después de normalizar y ajustar, test_run.X shape: {X_test.shape}")
-        keras_split.X.test = X_test
-        keras_split.y.test = test_run.y
-        keras_split.sub.test = test_run.sub
-        keras_split.trial.test = test_run.trial
-        keras_split.run.test = test_run.run
-        keras_split.mode.test = test_run.mode
-
-        
-        test_loss, test_acc = modelo.evaluate(X_test, test_run.y, verbose=0)
-        print(f"Test loss={test_loss:.4f}, acc={test_acc:.4f}")
-
-    
-    #En caso de que no haya ruta de validación ni split, validamos con el subconjunto val
-    else: 
-        print("Test set no reservado, se realizará evaluación en el set de validación.")
-        test_loss, test_acc = modelo.evaluate(keras_split.X.val, keras_split.y.val, verbose=0)
-        print(f"Validation loss={test_loss:.4f}, acc={test_acc:.4f}")
-
-    monitor_values = history.history[monitor]  # o early_monitor
-
-    if monitor.endswith("loss"):
-        best_epoch_idx = int(np.argmin(monitor_values))
+            print("\n  Orden final (mayor → menor acc):")
+            for rank, (acc_v, s) in enumerate(scored):
+                print(f"    Rank {rank+1}: sub={np.unique(s.sub)} "
+                      f"run={np.unique(s.run)} | acc={acc_v:.4f}")
+ 
     else:
-        best_epoch_idx = int(np.argmax(monitor_values))
+        print("Test set no reservado, se realizará evaluación en el set de validación.")
+        test_loss, test_acc = modelo.evaluate(
+            keras_split.X.val, keras_split.y.val, verbose=0
+        )
+        print(f"Validation loss={test_loss:.4f}, acc={test_acc:.4f}")
+ 
+    # ------------------------------------------------------------------
+    # Paso 8: info (sin cambios + ea_applied)
+    # ------------------------------------------------------------------
+    monitor_values = history.history[monitor]
+ 
+    best_epoch_idx = (int(np.argmin(monitor_values))
+                      if monitor.endswith("loss")
+                      else int(np.argmax(monitor_values)))
     best_value = monitor_values[best_epoch_idx]
-
-    info["best_epoch"] = best_epoch_idx
+ 
     info["best_epoch"]         = best_epoch_idx
-    info["best_monitor_value"] = float(monitor_values[best_epoch_idx])
+    info["best_monitor_value"] = float(best_value)
     info["epochs_ran"]         = len(monitor_values)
     info["monitor"]            = monitor
-    info["dynamic_lr"] = dynamic_lr
-    info["Lr_grid"] = Lr_grid
-    info["initial_lr"] = Lr
-    info["batch_size"] = batch
-    info["epochs_requested"] = epochs
-    info["best_epoch_idx"] = best_epoch_idx
-    info["best_monitor_value"] = best_value
-    info["epochs_ran"] = len(history.history["loss"])
-
-
-    
-
-    return modelo, history, channel_mean, channel_std, keras_split, info
+    info["dynamic_lr"]         = dynamic_lr
+    info["Lr_grid"]            = Lr_grid
+    info["initial_lr"]         = Lr
+    info["batch_size"]         = batch
+    info["epochs_requested"]   = epochs
+    info["best_epoch_idx"]     = best_epoch_idx
+    info["ea_applied"]         = apply_ea     # trazabilidad
+ 
+    return modelo, history, channel_mean, channel_std, keras_split, test_run_sorted, info
 
 def make_lr_scheduler(lr_schedule, verbose=True):
     """
@@ -1231,145 +1665,217 @@ def get_early_stopping_config(level="medium", monitor="val_loss"):
 
     return presets[level]
 
-def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =False, test_size=0.2, val_size=0.1,
-              unfreeze_last_n=16, lr=5e-4, use_class_weight=True, batch_size=32, 
-              normalize=True, undersample_rest=False, test_run=None, make_test=False,
-              dynamic_lr=False, Lr_grid=None, dynamic_unfreeze=False, unfreeze_grid =None,
-              patience_level="medium", monitor="val_loss",
-              model_checkpoint = None, #Para un futuro gridsearch
-
-              ):
-
+def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
+             test_size=0.1, val_size=0.1,
+             unfreeze_last_n=16, lr=5e-4, use_class_weight=True, batch_size=32,
+             normalize=True, undersample_rest=False, test_run=None, make_test=False,
+             dynamic_lr=False, Lr_grid=None, unfreeze_grid=None,
+             patience_level="medium", monitor="val_loss",
+             model_checkpoint=None,
+             apply_ea=False,       # NUEVO: activa Euclidean Alignment por sujeto
+             ea_eps=1e-3,          # NUEVO: regularización RELATIVA de eigenvalores de R
+             ):
+    """
+    Fine-tuning de EEGNet para un sujeto específico.
+ 
+    Parámetros nuevos
+    -----------------
+    apply_ea : bool (default False)
+        Si True, calcula R^{-1/2} sobre dataset_fine.X (crudo, antes de
+        normalizar) y lo aplica tanto al split de fine-tuning como al
+        test_run. mean/std se calculan DESPUÉS de la alineación, por lo
+        que son consistentes con el pipeline online.
+ 
+        El pipeline online con EA es:
+            X_ventana → R_invsqrt @ X_ventana → normalizar(mean, std) → Keras
+ 
+    ea_eps : float
+        Umbral RELATIVO para eigenvalores de R: cualquier eigenvalor menor
+        a `eigvals.max() * ea_eps` se regulariza antes de invertir. Al ser
+        relativo, funciona sin importar la escala/unidades de la señal.
+ 
+    Retorna
+    -------
+    model_ft, history, mean, std, keras_split_fine, info, ea_matrix
+ 
+    ea_matrix : dict con claves:
+        "R_invsqrt" : np.ndarray (C, C) — transformación EA. None si apply_ea=False.
+        "R"         : np.ndarray (C, C) — covarianza media original. None si apply_ea=False.
+        "applied"   : bool — indica si EA fue aplicado.
+ 
+    NOTA: si apply_ea=False, ea_matrix["R_invsqrt"] es None y el retorno
+    es compatible con el código existente (solo hay un valor extra al final).
+    """
+ 
+    # ------------------------------------------------------------------
+    # Paso 0: variables y validaciones (sin cambios)
+    # ------------------------------------------------------------------
     monitor_mode = "min" if monitor.endswith("loss") else "max"
-
-    #Paso 1: split 
-
-    if(len(np.unique(dataset_fine.sub)) != 1):
-        warnings.warn("El dataset de fine-tuning contiene más de un sujeto. Asegúrate de que sólo haya un sujeto para evitar data leakage")
-    
-    if test_run is None and make_test is False: 
-        raise ValueError("Si no se va a reservar un test set, entonces test_run no puede ser None. Considera reservar un test set o especificar test_run")
-
-    split_fine, info = split_eeg(dataset_fine, mode = "trial", test_size=test_size, val_size=val_size, debug=debug, make_test=make_test )
-
-    if debug: 
-        print("Tamaño del train:", split_fine.X.train.shape, "Tamaño del val:", split_fine.X.val.shape, "Tamaño del test:", split_fine.X.test.shape)
-
-    #Paso 2: Normalización con media y desviación dada (si no se da, se calcula con el mismo método que antes)
-
-    
-
+ 
+    if len(np.unique(dataset_fine.sub)) != 1:
+        warnings.warn(
+            "El dataset de fine-tuning contiene más de un sujeto. "
+            "Asegúrate de que sólo haya un sujeto para evitar data leakage"
+        )
+ 
+    if test_run is None and make_test is False:
+        raise ValueError(
+            "Si no se va a reservar un test set, entonces test_run no puede "
+            "ser None. Considera reservar un test set o especificar test_run"
+        )
+ 
+    # ------------------------------------------------------------------
+    # Paso 0.5 (NUEVO): Euclidean Alignment
+    # Debe aplicarse sobre X CRUDO, antes de cualquier normalización,
+    # para que mean/std calculados después sean consistentes con online.
+    # ------------------------------------------------------------------
+    R_invsqrt = None
+    R_cov     = None
+ 
+    if apply_ea:
+        if debug:
+            print("[EA] Calculando R^{-1/2} sobre dataset_fine.X crudo...")
+ 
+        R_invsqrt, R_cov = compute_ea_matrix(
+            dataset_fine.X, eps=ea_eps, debug=debug
+        )
+ 
+        # Alinear fine
+        dataset_fine = EEGSubset({
+            "X":     apply_ea_transform(dataset_fine.X, R_invsqrt),
+            "y":     dataset_fine.y,
+            "sub":   dataset_fine.sub,
+            "trial": dataset_fine.trial,
+            "run":   dataset_fine.run,
+            "mode":  dataset_fine.mode,
+        })
+ 
+        # Alinear test_run si existe
+        if test_run is not None:
+            test_run = EEGSubset({
+                "X":     apply_ea_transform(test_run.X, R_invsqrt),
+                "y":     test_run.y,
+                "sub":   test_run.sub,
+                "trial": test_run.trial,
+                "run":   test_run.run,
+                "mode":  test_run.mode,
+            })
+ 
+        if debug:
+            print(f"[EA] Alineación aplicada. "
+                  f"Traza R antes: {np.trace(R_cov):.3f} | "
+                  f"Ideal (=n_canales): {dataset_fine.X.shape[1]}")
+            print(f"[EA] Número de condición de R: {np.linalg.cond(R_cov):.1f}")
+ 
+    ea_matrix = {
+        "R_invsqrt": R_invsqrt,
+        "R":         R_cov,
+        "applied":   apply_ea,
+    }
+ 
+    # ------------------------------------------------------------------
+    # Paso 1: split (sin cambios)
+    # ------------------------------------------------------------------
+    split_fine, info = split_eeg(
+        dataset_fine, mode="trial",
+        test_size=test_size, val_size=val_size,
+        debug=debug, make_test=make_test
+    )
+ 
+    if debug:
+        print("Tamaño del train:", split_fine.X.train.shape,
+              "Tamaño del val:",  split_fine.X.val.shape,
+              "Tamaño del test:", split_fine.X.test.shape)
+ 
+    # ------------------------------------------------------------------
+    # Paso 2: normalización (sin cambios en lógica, ahora opera sobre
+    # datos ya alineados si apply_ea=True)
+    # ------------------------------------------------------------------
     if normalize:
         if mean is None or std is None:
             print("Advertencia: Se normaliza con los datos del usuario de ajuste")
             norm_split, mean, std = normalizar_split(split_fine)
         else:
             X_train = normalizar_por_canal(split_fine.X.train, mean, std)
-            X_val = normalizar_por_canal(split_fine.X.val, mean, std)
-            X_test = normalizar_por_canal(split_fine.X.test, mean, std)
-
+            X_val   = normalizar_por_canal(split_fine.X.val,   mean, std)
+            X_test  = normalizar_por_canal(split_fine.X.test,  mean, std)
+ 
             norm_split = DataSplit(
                 X_train, X_val, X_test,
                 split_fine.y.train, split_fine.y.val, split_fine.y.test,
-                split_fine.sub.train, split_fine.sub.val, split_fine.sub.test,
+                split_fine.sub.train,   split_fine.sub.val,   split_fine.sub.test,
                 split_fine.trial.train, split_fine.trial.val, split_fine.trial.test,
-                split_fine.run.train, split_fine.run.val, split_fine.run.test,
-                split_fine.mode.train, split_fine.mode.val, split_fine.mode.test
+                split_fine.run.train,   split_fine.run.val,   split_fine.run.test,
+                split_fine.mode.train,  split_fine.mode.val,  split_fine.mode.test,
             )
     else:
         norm_split, mean, std = normalizar_split(split_fine)
-
-    
-
-        
-
-
-    #Paso 3: Ajustar forma para Keras
-
+ 
+    # ------------------------------------------------------------------
+    # Paso 3: reshape Keras (sin cambios)
+    # ------------------------------------------------------------------
     keras_split_fine = prepare_keras_split(norm_split)
-
-    #Paso 3.5: Undersampling de clase rest en caso de que se desee (Sólo para el train, no queremos tocar val ni test)
-
+ 
+    # ------------------------------------------------------------------
+    # Paso 3.5: undersampling (sin cambios)
+    # ------------------------------------------------------------------
     if undersample_rest:
-        X_fine_train, y_fine_train, sub_fine_train, trial_fine_train, run_fine_train, mode_fine_train = apply_undersample_rest(keras_split_fine)
-    else: 
+        X_fine_train, y_fine_train, _, _, _, _ = apply_undersample_rest(keras_split_fine)
+    else:
         X_fine_train = keras_split_fine.X.train
-        y_fine_train = keras_split_fine.y.train #El resto ni los ocupamos we
-
-
-
+        y_fine_train = keras_split_fine.y.train
+ 
     if debug:
-        print("Antes de normalizar:", split_fine.X.train.shape, "Después de ajustar para Keras:", X_fine_train.shape)   
-    
-    #Paso 4: Clonar modelo para finetunning (para no afectar el modelo original)
+        print("Antes de normalizar:", split_fine.X.train.shape,
+              "Después de ajustar para Keras:", X_fine_train.shape)
+ 
+    # ------------------------------------------------------------------
+    # Paso 4: clonar modelo (sin cambios)
+    # ------------------------------------------------------------------
     model_ft = clone_model(base)
     model_ft.set_weights(base.get_weights())
-
-
-    callbacks = [] 
-    if dynamic_unfreeze:
-        if unfreeze_grid is None:
-            # grid por defecto: empieza con unfreeze_last_n//4, 
-            # sube a la mitad en época 0.3*epochs, y al total en 0.6*epochs
-            n = unfreeze_last_n if unfreeze_last_n != None else len(model_ft.layers)
-            unfreeze_grid = [
-                (0,                    max(1, n // 4)),
-                (int(epochs * 0.3),   max(1, n // 2)),
-                (int(epochs * 0.6),   n),
-            ]
-        callbacks.append(
-            make_unfreeze_scheduler(model_ft, unfreeze_grid, verbose=debug)
-        )
+ 
+    callbacks = []
+ 
+    if unfreeze_last_n is None or unfreeze_last_n > len(model_ft.layers):
+        for layer in model_ft.layers:
+            layer.trainable = True
     else:
-        # comportamiento actual: unfreeze estático al inicio
-        if  unfreeze_last_n is None or unfreeze_last_n > len(model_ft.layers): 
-            for layer in model_ft.layers:
-                layer.trainable = True
-        else:
-            for layer in model_ft.layers:
-                layer.trainable = False
-            for layer in model_ft.layers[-unfreeze_last_n:]:
-                layer.trainable = True
-
-
-
-    #Paso 5: recompilar con LR más bajo para fine-tuning
-
+        for layer in model_ft.layers:
+            layer.trainable = False
+        for layer in model_ft.layers[-unfreeze_last_n:]:
+            layer.trainable = True
+ 
+    # ------------------------------------------------------------------
+    # Paso 5: compilar (sin cambios)
+    # ------------------------------------------------------------------
     model_ft.compile(
         loss='sparse_categorical_crossentropy',
         optimizer=Adam(learning_rate=lr),
         metrics=['accuracy']
     )
-
+ 
     class_weight = None
     if use_class_weight:
         from sklearn.utils.class_weight import compute_class_weight
         classes_present = np.unique(y_fine_train)
-        weights = compute_class_weight('balanced', 
-                                        classes=classes_present, 
-                                        y=y_fine_train)
+        weights = compute_class_weight('balanced',
+                                       classes=classes_present,
+                                       y=y_fine_train)
         class_weight = dict(zip(classes_present, weights))
         if debug:
             print("Class weights:", class_weight)
-
-    if debug:
-        verbose = 1
-    else:
-        verbose = 0
-
-    #Paso 6: callbacks específicos para fine-tuning
-    
-
+ 
+    verbose = 1 if debug else 0
+ 
+    # ------------------------------------------------------------------
+    # Paso 6: callbacks (sin cambios)
+    # ------------------------------------------------------------------
     if model_checkpoint is None:
         model_checkpoint = "EEGNet_finetuned_subject.keras"
-
-    early_cfg = get_early_stopping_config(
-        level=patience_level,
-        monitor=monitor
-    )
-
-    
-
+ 
+    early_cfg = get_early_stopping_config(level=patience_level, monitor=monitor)
+ 
     if early_cfg is not None:
         callbacks.append(
             EarlyStopping(
@@ -1377,94 +1883,99 @@ def eeg_fine(base, dataset_fine, mean = None, std = None, epochs = 20, debug =Fa
                 patience=early_cfg["patience"],
                 min_delta=early_cfg["min_delta"],
                 restore_best_weights=early_cfg["restore_best_weights"],
-                mode = monitor_mode
+                mode=monitor_mode,
             )
         )
-
+ 
     ckpt_cb = ModelCheckpoint(
         filepath=model_checkpoint,
         monitor=monitor,
         save_best_only=True,
         save_weights_only=False,
-        mode=monitor_mode
+        mode=monitor_mode,
     )
     callbacks.append(ckpt_cb)
-    
-
+ 
     if dynamic_lr:
         if Lr_grid is None:
-            Lr_grid = [(0, lr), (int(epochs * 0.2), lr * 0.5), (int(epochs * 0.5), lr * 0.1)]
-
+            Lr_grid = [
+                (0,                    lr),
+                (int(epochs * 0.2),    lr * 0.5),
+                (int(epochs * 0.5),    lr * 0.1),
+            ]
         callbacks.append(
             LearningRateScheduler(
                 make_lr_scheduler(Lr_grid, verbose=debug),
-                verbose=0
+                verbose=0,
             )
         )
-
-
-
-    #Paso 7: entrenamiento de fine-tuning
+ 
+    # ------------------------------------------------------------------
+    # Paso 7: entrenamiento (sin cambios)
+    # ------------------------------------------------------------------
     history = model_ft.fit(
         X_fine_train, y_fine_train,
         validation_data=(keras_split_fine.X.val, keras_split_fine.y.val),
         callbacks=callbacks,
         epochs=epochs,
-        batch_size=batch_size,          
+        batch_size=batch_size,
         class_weight=class_weight,
-        verbose=verbose
+        verbose=verbose,
     )
-
-    #Paso 8: evaluación en test del sujeto
-
+ 
+    # ------------------------------------------------------------------
+    # Paso 8: evaluación en test (sin cambios en lógica;
+    # test_run ya está alineado si apply_ea=True)
+    # ------------------------------------------------------------------
     if make_test:
         print("Se realiza evaluación en el set del dataset.")
-        test_loss, test_acc = model_ft.evaluate(keras_split_fine.X.test, split_fine.y.test, verbose=0)
+        test_loss, test_acc = model_ft.evaluate(
+            keras_split_fine.X.test, keras_split_fine.y.test, verbose=0
+        )
         print(f"[Fine-tune] Test loss={test_loss:.4f}, acc={test_acc:.4f}")
-
-    elif test_run is not None: 
-        print("Se realizará evaluación en el set reservado")
-
-        X_test = normalize_run(test_run, mean, std) 
+ 
+    elif test_run is not None:
+        # normalize_run opera sobre test_run.X, que ya está alineado
+        # si apply_ea=True, por lo que mean/std son consistentes
+        X_test = normalize_run(test_run, mean, std)
+ 
         if debug:
-            print("Antes de normalizar:", test_run.X.shape, "Después de ajustar para Keras:", X_test.shape)
-
-        keras_split_fine.X.test = X_test
-        keras_split_fine.y.test = test_run.y
-        keras_split_fine.sub.test = test_run.sub
+            print("Antes de normalizar:", test_run.X.shape,
+                  "Después de ajustar para Keras:", X_test.shape)
+ 
+        keras_split_fine.X.test     = X_test
+        keras_split_fine.y.test     = test_run.y
+        keras_split_fine.sub.test   = test_run.sub
         keras_split_fine.trial.test = test_run.trial
-        keras_split_fine.run.test = test_run.run
-        keras_split_fine.mode.test = test_run.mode
-
-        
-
+        keras_split_fine.run.test   = test_run.run
+        keras_split_fine.mode.test  = test_run.mode
+ 
         test_loss, test_acc = model_ft.evaluate(X_test, test_run.y, verbose=0)
         print(f"[Fine-tune] Validation loss={test_loss:.4f}, acc={test_acc:.4f}")
-
-    monitor_values = history.history[monitor]  # o early_monitor
-
-    if monitor.endswith("loss"): #Si lo evaluamos en loss
-        best_epoch_idx = int(np.argmin(monitor_values))
-    else:
-        best_epoch_idx = int(np.argmax(monitor_values))
-
-    info["best_epoch"] = best_epoch_idx
+ 
+    # ------------------------------------------------------------------
+    # Paso 9: info (sin cambios, más ea_applied)
+    # ------------------------------------------------------------------
+    monitor_values = history.history[monitor]
+ 
+    best_epoch_idx = (int(np.argmin(monitor_values))
+                      if monitor.endswith("loss")
+                      else int(np.argmax(monitor_values)))
+ 
     info["best_epoch"]         = best_epoch_idx
     info["best_monitor_value"] = float(monitor_values[best_epoch_idx])
     info["epochs_ran"]         = len(monitor_values)
     info["monitor"]            = monitor
-    info["dynamic_lr"] = dynamic_lr
-    info["Lr_grid"] = Lr_grid
-    info["initial_lr"] = lr
-    info["batch_size"] = batch_size
-    info["epochs_requested"] = epochs
-    info["unfreeze_grid"] = unfreeze_grid
-
-
-
-
-
-    return model_ft, history, mean, std, keras_split_fine, info
+    info["dynamic_lr"]         = dynamic_lr
+    info["Lr_grid"]            = Lr_grid
+    info["initial_lr"]         = lr
+    info["batch_size"]         = batch_size
+    info["epochs_requested"]   = epochs
+    info["unfreeze_grid"]      = unfreeze_grid
+    info["ea_applied"]         = apply_ea   # NUEVO: trazabilidad en CSV
+ 
+    return model_ft, history, mean, std, keras_split_fine, info, ea_matrix
+ 
 
 def normalize_run(run, mean, std, eps=1e-6):
     X_norm = normalizar_por_canal(run.X, mean, std, eps)
@@ -1544,34 +2055,6 @@ def undersample(X, y, sub, rest_label=0, random_state=42, debug=False):
 
 #==== Vibecoding abajo ====
 
-from tensorflow.keras.callbacks import Callback
-
-def make_unfreeze_scheduler(model, unfreeze_grid, verbose=False):
-    class UnfreezeScheduler(Callback):
-        def on_epoch_begin(self, epoch, logs=None):
-            for ep, n in sorted(unfreeze_grid, key=lambda x: x[0]):
-                if epoch == ep:
-                    for layer in self.model.layers:
-                        layer.trainable = False
-                    if n == "all":
-                        for layer in self.model.layers:
-                            layer.trainable = True
-                    else:
-                        for layer in self.model.layers[-n:]:
-                            layer.trainable = True
-                    current_lr = float(
-                        self.model.optimizer.learning_rate
-                    )
-                    self.model.compile(
-                        optimizer=Adam(learning_rate=current_lr),
-                        loss="sparse_categorical_crossentropy",
-                        metrics=["accuracy"]
-                    )
-                    if verbose:
-                        status = "todas" if n == "all" else f"últimas {n}"
-                        print(f"\n[UnfreezeScheduler] Época {epoch}: descongelando {status} capas")
-    return UnfreezeScheduler()
-
 def evaluate(
     modelo,
     keras_split=None,
@@ -1579,25 +2062,58 @@ def evaluate(
     title="EEGNet",
     all_data=False,
     test_run=None,
+    mean=None,
+    std=None,
     plot=True,
-    verbose=True
+    verbose=True,
+    debug=False,
 ):
     """
     Evalúa un modelo EEGNet de forma más completa para experimentos tipo paper.
 
     Usa, en orden de prioridad:
-    1) test_run si se entrega
+    1) test_run si se entrega — puede ser:
+       a) Un EEGSubset sin normalizar → requiere mean y std para normalizar internamente.
+       b) Un DataSplit ya preparado para Keras (test_run.X tiene shape (N,C,T,1)).
     2) todo train+val+test si all_data=True
     3) keras_split.X.test / keras_split.y.test por defecto
 
-    IMPORTANTE:
-    - test_run debe estar ya normalizado y en formato Keras: (N, C, T, 1)
-      o ser un DataSplit/EEGSubset previamente preparado.
+    Parámetros
+    ----------
+    mean, std : arrays de normalización del modelo (channel_mean, channel_std).
+                Solo necesarios si test_run es un EEGSubset sin normalizar.
+    debug     : imprime información del proceso de selección de datos.
     """
 
     if test_run is not None:
-        X_test = test_run.X
+        # Detectamos si es un EEGSubset crudo (X shape 3D: N, C, T)
+        # o ya está en formato Keras 4D (N, C, T, 1)
+        raw_X = test_run.X
         y_test = test_run.y
+
+        if raw_X.ndim == 3:
+            # EEGSubset sin normalizar → normalizar y ajustar
+            if mean is None or std is None:
+                raise ValueError(
+                    "test_run es un EEGSubset sin normalizar (X.ndim==3). "
+                    "Debes pasar mean y std del modelo para normalizarlo."
+                )
+            if debug:
+                print(f"[evaluate] test_run es EEGSubset crudo. Normalizando con mean/std del modelo...")
+                print(f"  X shape antes : {raw_X.shape}")
+            X_test = normalize_run(test_run, mean, std)
+            if debug:
+                print(f"  X shape después: {X_test.shape}")
+        elif raw_X.ndim == 4:
+            # Ya está listo para Keras
+            if debug:
+                print(f"[evaluate] test_run ya está en formato Keras 4D: {raw_X.shape}")
+            X_test = raw_X
+        else:
+            raise ValueError(
+                f"test_run.X tiene shape inesperado: {raw_X.shape}. "
+                "Esperado 3D (EEGSubset crudo) o 4D (formato Keras)."
+            )
 
     elif all_data:
         if keras_split is None:
@@ -2083,62 +2599,107 @@ def save_model(
     mean,
     std,
     label_map,
+    split=None,
+    info=None,
     path=None,
-    name="model_EEGNet"
+    name="model_EEGNet",
+    ea_matrix=None,    # NUEVO: dict {"R_invsqrt": ..., "R": ..., "applied": bool}
 ):
     """
     Guarda:
-        <name>.keras -> modelo entrenado
-        <name>.npz   -> mean, std y significado de sus salidas
+        <name>.keras  -> modelo entrenado
+        <name>.npz    -> parámetros de inferencia online
+ 
+    Parámetros nuevos
+    -----------------
+    ea_matrix : dict o None
+        Si se entrega (y ea_matrix["applied"] es True), el .npz incluye
+        R_invsqrt y R_diag, necesarios para el pipeline online con EA.
+ 
+        Pipeline online sin EA:
+            X → normalizar(mean, std) → Keras
+ 
+        Pipeline online con EA  (cuando ea_applied=True en el .npz):
+            X → R_invsqrt @ X → normalizar(mean, std) → Keras
+ 
+    El campo "ea_applied" en el .npz actúa como flag para que el código
+    de inferencia online sepa qué pipeline aplicar sin asumir nada.
     """
-
+ 
     if path is None:
         path = os.getcwd()
-
+ 
     os.makedirs(path, exist_ok=True)
-
+ 
     if name.endswith(".keras") or name.endswith(".npz"):
         raise ValueError("name debe ir sin extensión.")
-    
-    
-
-    n_outputs = model.output_shape[-1] #Entrega el número de salidas del modelo, que debería coincidir con el número de clases que tenemos después del pickeo y la fusión
-
+ 
+    n_outputs = model.output_shape[-1]
+ 
     if sorted(label_map.keys()) != list(range(n_outputs)):
         raise ValueError(
             f"label_map incompatible con el modelo. "
             f"Modelo: {n_outputs} salidas | label_map: {label_map}"
         )
-
-    class_names = np.array( #Entrega un array con los nombres de las salidas
+ 
+    class_names = np.array(
         [label_map[i] for i in range(n_outputs)],
         dtype=str
     )
-
+ 
     simp_class_names = []
-
     for name_in in class_names:
         if name_in.endswith("_m") or name_in.endswith("_i"):
             name_in = name_in[:-2]
-
         simp_class_names.append(name_in)
-
-
-    model_path = os.path.join(path, f"{name}.keras")
+ 
+    model_path  = os.path.join(path, f"{name}.keras")
     params_path = os.path.join(path, f"{name}.npz")
-
+ 
     model.save(model_path)
-
-    np.savez_compressed(
-        params_path,
-        mean=np.asarray(mean, dtype=np.float32),
-        std=np.asarray(std, dtype=np.float32),
-        class_names=simp_class_names
+ 
+    # ------------------------------------------------------------------
+    # Construir el dict de parámetros del .npz
+    # ------------------------------------------------------------------
+    save_dict = dict(
+        mean        = np.asarray(mean, dtype=np.float32),
+        std         = np.asarray(std,  dtype=np.float32),
+        class_names = simp_class_names,
+        info        = info,
+        split       = split,
+        ea_applied  = np.array([False]),   # default: sin EA
     )
-
-    print(f"Modelo guardado: {model_path}")
+ 
+    # Si se entregó ea_matrix con alineación aplicada, añadir R_invsqrt
+    ea_was_applied = (
+        ea_matrix is not None
+        and ea_matrix.get("applied", False)
+        and ea_matrix.get("R_invsqrt") is not None
+    )
+ 
+    if ea_was_applied:
+        save_dict["ea_applied"]  = np.array([True])
+        save_dict["R_invsqrt"]   = np.asarray(
+            ea_matrix["R_invsqrt"], dtype=np.float32
+        )
+        # R_diag solo para diagnóstico offline — no se usa en inferencia
+        if ea_matrix.get("R") is not None:
+            save_dict["R_diag"] = np.asarray(
+                np.diag(ea_matrix["R"]), dtype=np.float32
+            )
+ 
+    np.savez_compressed(params_path, **save_dict)
+ 
+    # ------------------------------------------------------------------
+    # Print resumen
+    # ------------------------------------------------------------------
+    print(f"Modelo guardado    : {model_path}")
     print(f"Parámetros guardados: {params_path}")
-    print(f"Clases del modelo: {dict(enumerate(class_names))}")
+    print(f"Clases del modelo  : {dict(enumerate(class_names))}")
+    if ea_was_applied:
+        print(f"EA incluida        : R_invsqrt shape={ea_matrix['R_invsqrt'].shape}")
+    else:
+        print(f"EA incluida        : No")
 
  
 def compare_models(
@@ -2294,7 +2855,301 @@ def compare_models(
         "y_true_fine": y_test_ft,
         "y_pred_fine": y_pred_ft,
     }
-    
+
+
+def evaluate_moabb(
+    modelo,
+    test_subsets,
+    mean,
+    std,
+    label_map=None,
+    fold_table=None,
+    test_result="subject",
+    plot=False,
+    verbose=False,
+    debug=False,
+):
+    """
+    Evalúa un modelo sobre múltiples EEGSubset de test y genera una tabla limpia
+    para informe/paper.
+
+    test_result:
+        "run"     -> una fila por run/fold.
+        "subject" -> una fila por sujeto con mean ± std.
+        "all"     -> una sola fila global con mean ± std.
+
+    Columnas finales:
+        subject | run | fined | accuracy | macro_f1 | balanced_accuracy
+    """
+
+    import numpy as np
+    import pandas as pd
+
+    if test_subsets is None or len(test_subsets) == 0:
+        raise ValueError("test_subsets está vacío o es None.")
+
+    valid_modes = {"run", "subject", "all", None}
+    if test_result not in valid_modes:
+        raise ValueError(
+            f"test_result='{test_result}' no válido. Usa 'run', 'subject', 'all' o None."
+        )
+
+    if test_result is None:
+        test_result = "run"
+
+    def _fmt(mean_value, std_value=None, decimals=3):
+        if std_value is None:
+            return f"{mean_value:.{decimals}f}"
+        return f"{mean_value:.{decimals}f} ± {std_value:.{decimals}f}"
+
+    def _safe_unique_one(arr):
+        vals = np.unique(arr)
+        if len(vals) == 1:
+            return vals[0]
+        return str(list(vals))
+
+    def _get_fined_from_fold_table(i):
+        if fold_table is None:
+            return "unknown"
+
+        if "fold" in fold_table.columns:
+            row = fold_table[fold_table["fold"] == i]
+            if len(row) == 0:
+                return "unknown"
+            row = row.iloc[0]
+        else:
+            if i >= len(fold_table):
+                return "unknown"
+            row = fold_table.iloc[i]
+
+        if "fine_runs" in row:
+            return row["fine_runs"]
+
+        if "fined" in row:
+            return row["fined"]
+
+        return "unknown"
+
+    def _eval_subset(subset, title=""):
+        X_norm = normalize_run(subset, mean, std)
+        y_true = subset.y
+
+        if debug:
+            print(f"Evaluando {title}")
+            print("X:", X_norm.shape)
+            print("Sujeto:", np.unique(subset.sub))
+            print("Run:", np.unique(subset.run))
+            print("Clases:", dict(zip(*np.unique(subset.y, return_counts=True))))
+
+        y_prob = modelo.predict(X_norm, verbose=0)
+
+        if label_map is not None:
+            labels = np.array(sorted(label_map.keys()))
+            class_names = [label_map[i] for i in labels]
+        else:
+            labels = np.arange(y_prob.shape[1])
+            class_names = [str(i) for i in labels]
+
+        results = evaluar_modelo_multiclase(
+            y_true=y_true,
+            y_prob=y_prob,
+            labels=labels,
+            class_names=class_names,
+            title_prefix=title,
+            plot=plot,
+            verbose=verbose
+        )
+
+        return results
+
+    # =====================================================
+    # 1) Evaluación por run/fold
+    # =====================================================
+
+    rows = []
+    rows_raw = []
+
+    for i, subset in enumerate(test_subsets):
+
+        subject_i = _safe_unique_one(subset.sub)
+        run_i = _safe_unique_one(subset.run)
+        fined_i = _get_fined_from_fold_table(i)
+
+        metrics_i = _eval_subset(
+            subset,
+            title=f"subject={subject_i} | run={run_i}"
+        )
+
+        row = {
+            "fold": i,
+            "subject": int(subject_i) if isinstance(subject_i, (int, np.integer)) else subject_i,
+            "run": int(run_i) if isinstance(run_i, (int, np.integer)) else run_i,
+            "fined": fined_i,
+            "accuracy_raw": metrics_i["accuracy"],
+            "macro_f1_raw": metrics_i["macro_f1"],
+            "balanced_accuracy_raw": metrics_i["balanced_accuracy"],
+        }
+
+        rows.append(row)
+
+        rows_raw.append({
+            "fold": i,
+            "subject": subject_i,
+            "run": run_i,
+            "fined": fined_i,
+            "metrics": metrics_i,
+        })
+
+        if debug:
+            print(
+                f"[fold {i}] subject={subject_i}, run={run_i}, fined={fined_i} | "
+                f"acc={metrics_i['accuracy']:.3f}, "
+                f"macro_f1={metrics_i['macro_f1']:.3f}, "
+                f"bal_acc={metrics_i['balanced_accuracy']:.3f}"
+            )
+
+    df_runs = pd.DataFrame(rows)
+
+    # =====================================================
+    # 2) Salida por run
+    # =====================================================
+
+    if test_result == "run":
+        df_out = df_runs.copy()
+
+        df_out["accuracy"] = df_out["accuracy_raw"].map(lambda x: _fmt(x))
+        df_out["macro_f1"] = df_out["macro_f1_raw"].map(lambda x: _fmt(x))
+        df_out["balanced_accuracy"] = df_out["balanced_accuracy_raw"].map(lambda x: _fmt(x))
+
+        df_out = df_out[
+            [
+                "subject",
+                "run",
+                "fined",
+                "accuracy",
+                "macro_f1",
+                "balanced_accuracy",
+            ]
+        ]
+
+        return df_out, df_runs, rows_raw
+
+    # =====================================================
+    # 3) Salida agregada por sujeto
+    # =====================================================
+
+    if test_result == "subject":
+
+        subject_rows = []
+
+        for subject, df_s in df_runs.groupby("subject"):
+
+            acc_mean = df_s["accuracy_raw"].mean()
+            acc_std = df_s["accuracy_raw"].std(ddof=1) if len(df_s) > 1 else 0.0
+
+            f1_mean = df_s["macro_f1_raw"].mean()
+            f1_std = df_s["macro_f1_raw"].std(ddof=1) if len(df_s) > 1 else 0.0
+
+            bal_mean = df_s["balanced_accuracy_raw"].mean()
+            bal_std = df_s["balanced_accuracy_raw"].std(ddof=1) if len(df_s) > 1 else 0.0
+
+            subject_rows.append({
+                "subject": subject,
+                "run": "all",
+                "fined": "all folds",
+                "accuracy": _fmt(acc_mean, acc_std),
+                "macro_f1": _fmt(f1_mean, f1_std),
+                "balanced_accuracy": _fmt(bal_mean, bal_std),
+
+                # columnas numéricas útiles para ordenar/exportar
+                "accuracy_mean": round(acc_mean, 3),
+                "accuracy_std": round(acc_std, 3),
+                "macro_f1_mean": round(f1_mean, 3),
+                "macro_f1_std": round(f1_std, 3),
+                "balanced_accuracy_mean": round(bal_mean, 3),
+                "balanced_accuracy_std": round(bal_std, 3),
+            })
+
+        df_out = pd.DataFrame(subject_rows)
+
+        df_out = df_out.sort_values(
+            by=["macro_f1_mean", "balanced_accuracy_mean", "accuracy_mean"],
+            ascending=False
+        ).reset_index(drop=True)
+
+        return df_out, df_runs, rows_raw
+
+    # =====================================================
+    # 4) Salida agregada global
+    # =====================================================
+
+    if test_result == "all":
+
+        acc_mean = df_runs["accuracy_raw"].mean()
+        acc_std = df_runs["accuracy_raw"].std(ddof=1) if len(df_runs) > 1 else 0.0
+
+        f1_mean = df_runs["macro_f1_raw"].mean()
+        f1_std = df_runs["macro_f1_raw"].std(ddof=1) if len(df_runs) > 1 else 0.0
+
+        bal_mean = df_runs["balanced_accuracy_raw"].mean()
+        bal_std = df_runs["balanced_accuracy_raw"].std(ddof=1) if len(df_runs) > 1 else 0.0
+
+        df_out = pd.DataFrame([{
+            "subject": "all",
+            "run": "all",
+            "fined": "all folds",
+            "accuracy": _fmt(acc_mean, acc_std),
+            "macro_f1": _fmt(f1_mean, f1_std),
+            "balanced_accuracy": _fmt(bal_mean, bal_std),
+
+            # numéricas
+            "accuracy_mean": round(acc_mean, 3),
+            "accuracy_std": round(acc_std, 3),
+            "macro_f1_mean": round(f1_mean, 3),
+            "macro_f1_std": round(f1_std, 3),
+            "balanced_accuracy_mean": round(bal_mean, 3),
+            "balanced_accuracy_std": round(bal_std, 3),
+        }])
+
+        return df_out, df_runs, rows_raw
+
+def summarize_finetuning_by_subject(df_runfold):
+    def fmt(mean, std):
+        return f"{mean:.3f} ± {std:.3f}"
+
+    rows = []
+
+    for subject, df_s in df_runfold.groupby("subject"):
+
+        acc_mean = df_s["accuracy"].mean()
+        acc_std = df_s["accuracy"].std(ddof=1) if len(df_s) > 1 else 0.0
+
+        f1_mean = df_s["macro_f1"].mean()
+        f1_std = df_s["macro_f1"].std(ddof=1) if len(df_s) > 1 else 0.0
+
+        bal_mean = df_s["balanced_accuracy"].mean()
+        bal_std = df_s["balanced_accuracy"].std(ddof=1) if len(df_s) > 1 else 0.0
+
+        rows.append({
+            "subject": subject,
+            "run": "all",
+            "fined": "all folds",
+            "accuracy": fmt(acc_mean, acc_std),
+            "macro_f1": fmt(f1_mean, f1_std),
+            "balanced_accuracy": fmt(bal_mean, bal_std),
+            "accuracy_mean": round(acc_mean, 3),
+            "macro_f1_mean": round(f1_mean, 3),
+            "balanced_accuracy_mean": round(bal_mean, 3)
+        })
+
+    out = pd.DataFrame(rows)
+    out = out.sort_values(
+        by=["macro_f1_mean", "balanced_accuracy_mean", "accuracy_mean"],
+        ascending=False
+    ).reset_index(drop=True)
+
+    return out
+
 def save_metrics_csv(
     info,
     metrics,
@@ -2465,3 +3320,216 @@ def save_metrics_csv(
     print(f"✔ Métricas guardadas en: {csv_path}")
     return row
 
+# ============================================================
+# Alineamiento euclidiano (Sirve para transfer learning una vez tenemos el modelo general ya hecho)
+# He & Wu, 2019 — "Transfer Learning for Brain–Computer Interfaces:
+# A Euclidean Space Data Alignment Approach"
+#
+# Dado que muchas firmas eléctricas de las señales de los sujetos de prueba pueden verse alejadas del modelo de prueba
+# Se ajusta la covarianza de entrenar en el finetuning para que quede más cerca del mean entregado por el modelo 
+# Dentro de estas funcioones ROBADAS, se ajiustan los datos del X parta ajustarlos más al mean del modelo general, para luego entrenar como si nada 
+#
+# FLUJO DE USO:
+#   1. Durante fine-tuning: compute_ea_matrix(fine_subset.X)  -> R_invsqrt
+#   2. apply_ea(fine_subset.X, R_invsqrt)  antes de normalizar_por_canal
+#   3. Durante test online:  apply_ea(X_ventana, R_invsqrt)   antes de normalizar
+# ============================================================
+
+
+
+
+def compute_ea_matrix(X, eps=1e-3, debug=False):
+    """
+    Calcula R^{-1/2} a partir de los datos de calibración del sujeto.
+
+    Parámetros
+    ----------
+    X : np.ndarray, shape (N, C, T)
+        Señal cruda del sujeto (runs de fine-tuning, SIN normalizar).
+        N = ventanas, C = canales, T = muestras por ventana.
+
+    eps : float
+        Umbral RELATIVO para eigenvalores: cualquier eigenvalor menor a
+        `eigvals.max() * eps` se reemplaza por ese piso antes de invertir.
+        Al ser relativo a la escala de R, funciona igual sin importar las
+        unidades de la señal (volts crudos, microvolts, datos normalizados, etc.).
+        Un valor absoluto fijo (p.ej. 1e-10) puede terminar siendo del mismo
+        orden que TODOS los eigenvalores de R si la señal está en volts
+        (~1e-10 a 1e-17), lo que rompe el blanqueo en vez de regularizarlo.
+
+    Retorna
+    -------
+    R_invsqrt : np.ndarray, shape (C, C)
+        Matriz de transformación. Guárdala junto a mean/std del modelo.
+
+    R : np.ndarray, shape (C, C)
+        Covarianza media (útil para diagnóstico).
+    """
+
+    assert X.ndim == 3, f"X debe ser (N, C, T), recibido {X.shape}"
+    N, C, T = X.shape
+
+    # Covarianza por ventana: X_i @ X_i^T / T
+    # einsum es más rápido que el loop para N grande
+    covs = np.einsum('nct,ndt->ncd', X, X) / T   # (N, C, C)
+    R = covs.mean(axis=0)                          # (C, C)
+
+    # Eigendecomposición simétrica (más estable numéricamente que scipy.sqrtm)
+    eigvals, eigvecs = np.linalg.eigh(R)
+
+    threshold = eigvals.max() * eps
+
+    if debug:
+        print(f"[EA] Eigenvalores de R: min={eigvals.min():.3e}, max={eigvals.max():.3e}")
+        print(f"[EA] Traza de R antes de alinear: {np.trace(R):.3e}")
+        n_small = np.sum(eigvals < threshold)
+        if n_small > 0:
+            print(f"[EA] Advertencia: {n_small} eigenvalor(es) < umbral={threshold:.3e}, se aplicará regularización.")
+
+    eigvals_safe = np.maximum(eigvals, threshold)
+    R_invsqrt = eigvecs @ np.diag(eigvals_safe ** -0.5) @ eigvecs.T
+
+    if debug:
+        # Verificación: covarianza después de alinear debe ser ≈ I
+        X_check = apply_ea_transform(X[:min(N, 50)], R_invsqrt)
+        covs_check = np.einsum('nct,ndt->ncd', X_check, X_check) / T
+        R_check = covs_check.mean(axis=0)
+        off_diag_err = np.abs(R_check - np.eye(C)).mean()
+        print(f"[EA] Error off-diagonal post-alineación (debe ser ≈ 0): {off_diag_err:.4f}")
+
+    return R_invsqrt, R
+
+
+def apply_ea_transform(X, R_invsqrt):
+    """
+    Aplica la transformación EA a un batch de ventanas o a una sola ventana.
+
+    Parámetros
+    ----------
+    X : np.ndarray
+        shape (N, C, T)  — batch de ventanas
+        shape (C, T)     — una sola ventana (modo online)
+
+    R_invsqrt : np.ndarray, shape (C, C)
+        Calculado con compute_ea_matrix() sobre los datos de calibración.
+
+    Retorna
+    -------
+    X_aligned : np.ndarray, misma shape que X
+    """
+    if X.ndim == 2:
+        # Modo online: una sola ventana (C, T)
+        return R_invsqrt @ X
+
+    # Modo batch: (N, C, T)
+    # einsum equivale a: para cada n, R_invsqrt @ X[n]
+    return np.einsum('cd,ndt->nct', R_invsqrt, X)
+
+
+def compute_ea_matrix_from_subset(subset, eps=1e-10, debug=False):
+    """
+    Wrapper conveniente que acepta un EEGSubset directamente.
+
+    Uso:
+        R_invsqrt, R = compute_ea_matrix_from_subset(data_fine_folds[i], debug=True)
+    """
+    assert hasattr(subset, 'X'), "subset debe ser un EEGSubset con atributo X"
+    assert subset.X.ndim == 3, f"subset.X debe ser (N, C, T), recibido {subset.X.shape}"
+
+    return compute_ea_matrix(subset.X, eps=eps, debug=debug)
+
+
+def normalize_run_ea(run, R_invsqrt, mean, std, eps=1e-6):
+    """
+    Pipeline completo para un EEGSubset de test: EA → normalización → reshape Keras.
+    Reemplaza normalize_run() cuando se usa EA.
+
+    Parámetros
+    ----------
+    run        : EEGSubset con X shape (N, C, T)
+    R_invsqrt  : Calculado con compute_ea_matrix_from_subset(fine_subset)
+    mean, std  : Del fine-tuning (como siempre)
+
+    Retorna
+    -------
+    X_keras : np.ndarray, shape (N, C, T, 1)
+    """
+    from backend_DL_v2 import normalizar_por_canal, ajustar_keras
+
+    X_aligned = apply_ea_transform(run.X, R_invsqrt)   # EA
+    X_norm    = normalizar_por_canal(X_aligned, mean, std, eps)  # normalización
+    X_keras   = ajustar_keras(X_norm)                   # reshape para Keras
+
+    return X_keras
+
+
+# ============================================================
+# CAMBIOS EN eeg_fine() PARA INTEGRAR EA
+# ============================================================
+#
+# En el Paso 2 de eeg_fine, ANTES de normalizar_split o normalizar_por_canal,
+# añadir:
+#
+#   # --- EA: alinear datos del sujeto ---
+#   if use_ea:
+#       R_invsqrt, R_diag = compute_ea_matrix(split_fine.X.train, debug=debug)
+#       split_fine_X_train_ea = apply_ea(split_fine.X.train, R_invsqrt)
+#       split_fine_X_val_ea   = apply_ea(split_fine.X.val,   R_invsqrt)
+#       # Reemplazar en split_fine
+#       split_fine = DataSplit(
+#           split_fine_X_train_ea, split_fine_X_val_ea, split_fine.X.test,
+#           split_fine.y.train, split_fine.y.val, split_fine.y.test,
+#           ... (resto igual)
+#       )
+#
+# Y en el test_run dentro de eeg_fine:
+#
+#   X_test = normalize_run_ea(test_run, R_invsqrt, mean, std)
+#
+# Retornar también R_invsqrt para usarlo en evaluación posterior:
+#   return model_ft, history, mean, std, keras_split_fine, info, R_invsqrt
+#
+# ============================================================
+
+
+# ============================================================
+# DIAGNÓSTICO: ver si EA ayuda a un sujeto específico
+# ============================================================
+
+def diagnose_ea(fine_subset, test_subset, debug=True):
+    """
+    Muestra el efecto de EA en la distribución de un sujeto.
+    Útil para confirmar que el sujeto 98 / 67 tiene covarianza alejada
+    de la media del grupo antes de alinear.
+
+    Uso:
+        diagnose_ea(data_fine_folds[fold_98], data_test_folds[fold_98])
+    """
+    R_invsqrt, R = compute_ea_matrix(fine_subset.X, debug=False)
+
+    print("=" * 50)
+    print(f"Sujeto: {np.unique(fine_subset.sub)}")
+    print(f"Runs fine-tuning: {np.unique(fine_subset.run)}")
+    print(f"\nCovarianza media (diagonal R):")
+    print(f"  {np.diag(R).round(3)}")
+    print(f"  Traza: {np.trace(R):.3f}  (ideal = n_canales = {fine_subset.X.shape[1]})")
+    print(f"  Condición de R: {np.linalg.cond(R):.1f}  (>100 = mal condicionada)")
+
+    # Tras alinear
+    X_aligned = apply_ea_transform(fine_subset.X, R_invsqrt)
+    covs_post = np.einsum('nct,ndt->ncd', X_aligned, X_aligned) / X_aligned.shape[2]
+    R_post = covs_post.mean(axis=0)
+
+    print(f"\nDespués de EA:")
+    print(f"  Diagonal R_post: {np.diag(R_post).round(3)}")
+    print(f"  Traza: {np.trace(R_post):.3f}")
+
+    # Test subset
+    X_test_aligned = apply_ea_transform(test_subset.X, R_invsqrt)
+    covs_test = np.einsum('nct,ndt->ncd', X_test_aligned, X_test_aligned) / X_test_aligned.shape[2]
+    R_test = covs_test.mean(axis=0)
+    print(f"\nTest subset (post-EA):")
+    print(f"  Traza: {np.trace(R_test):.3f}  (debe ser ≈ {fine_subset.X.shape[1]})")
+    print("=" * 50)
+
+    return R_invsqrt
