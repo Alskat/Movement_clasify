@@ -59,6 +59,8 @@ class EEGSubset:
         self.trial = data_dict["trial"]
         self.run = data_dict["run"]
         self.mode = data_dict["mode"]
+        # Propagamos channels_names si viene en el dict (opcional)
+        self.channels_names = data_dict.get("channels_names", None)
 
 #1 Vamos a crear la clase donde procesaremos todos los datos con el pick, el dataset
 class Selection:
@@ -293,7 +295,8 @@ class Selection:
             "sub": self.sub[mask_model],
             "trial": self.trial[mask_model],
             "run": self.run[mask_model],
-            "mode": self.mode[mask_model]
+            "mode": self.mode[mask_model],
+            "channels_names": self.channels_names,
         }
 
         data_fine_full = {
@@ -302,7 +305,8 @@ class Selection:
             "sub": self.sub[mask_fine],
             "trial": self.trial[mask_fine],
             "run": self.run[mask_fine],
-            "mode": self.mode[mask_fine]
+            "mode": self.mode[mask_fine],
+            "channels_names": self.channels_names,
         }
 
         self.data_model = EEGSubset(data_model)
@@ -356,7 +360,8 @@ class Selection:
                     "sub": data_fine_full["sub"][mask_fine_train],
                     "trial": data_fine_full["trial"][mask_fine_train],
                     "run": data_fine_full["run"][mask_fine_train],
-                    "mode": data_fine_full["mode"][mask_fine_train]
+                    "mode": data_fine_full["mode"][mask_fine_train],
+                    "channels_names": self.channels_names,
                 }
 
                 data_test = {
@@ -365,7 +370,8 @@ class Selection:
                     "sub": data_fine_full["sub"][mask_test],
                     "trial": data_fine_full["trial"][mask_test],
                     "run": data_fine_full["run"][mask_test],
-                    "mode": data_fine_full["mode"][mask_test]
+                    "mode": data_fine_full["mode"][mask_test],
+                    "channels_names": self.channels_names,
                 }
 
                 fine_subset = EEGSubset(data_fine_train)
@@ -1173,12 +1179,13 @@ def runfolds(
     # -------------------------------------------------
     def make_subset(obj, mask):
         data = {
-            "X": obj.X[mask],
-            "y": obj.y[mask],
-            "sub": obj.sub[mask],
-            "trial": obj.trial[mask],
-            "run": obj.run[mask],
-            "mode": obj.mode[mask]
+            "X":             obj.X[mask],
+            "y":             obj.y[mask],
+            "sub":           obj.sub[mask],
+            "trial":         obj.trial[mask],
+            "run":           obj.run[mask],
+            "mode":          obj.mode[mask],
+            "channels_names": getattr(obj, 'channels_names', None),
         }
         return EEGSubset(data)
 
@@ -1297,8 +1304,9 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
               undersample_rest=False, test_run=None, checkpoint_path=None,
               Lr=1e-3, dynamic_lr=False, Lr_grid=None,
               patience_level="medium", monitor="val_loss", dropout_rate=0.5,
-              apply_ea=False,    # NUEVO: EA por sujeto antes de normalizar
-              ea_eps=1e-3,       # NUEVO: regularización RELATIVA de eigenvalores
+              apply_ea=False,    # EA por sujeto antes de normalizar
+              ea_eps=1e-3,       # regularización RELATIVA de eigenvalores
+              apply_lsf=False,   # NUEVO: Surface Laplacian Filter antes de normalizar
               ):
     """
     Entrenamiento general de EEGNet.
@@ -1322,6 +1330,17 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
         Umbral RELATIVO para eigenvalores de R: cualquier eigenvalor menor
         a `eigvals.max() * ea_eps` se regulariza antes de invertir. Al ser
         relativo, funciona sin importar la escala/unidades de la señal.
+    apply_lsf : bool (default False)
+        Si True, aplica el Small Laplacian Filter (Nunez et al., 1997) a
+        cada ventana ANTES de normalizar. La matriz L se precalcula una
+        sola vez a partir de data_obj.channels_names y se reutiliza en
+        todos los sujetos y folds.  En runtime es L @ X — latencia < 0.1 ms.
+
+        El pipeline con LSF es:
+            X_crudo → L @ X → (EA opcional) → normalizar(mean, std) → Keras
+
+        Los nombres de canales se leen automáticamente desde
+        data_obj.channels_names (cargados con Selection.load()).
     """
  
     # ------------------------------------------------------------------
@@ -1344,6 +1363,38 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
             "Se usará un schedule por defecto."
         )
  
+    # ------------------------------------------------------------------
+    # Paso 0.25 (NUEVO): Surface Laplacian Filter por sujeto
+    # Se aplica sobre X CRUDO, antes de EA y normalización.
+    # La matriz L es estática (no depende del sujeto) y se precalcula
+    # una sola vez para todos los folds.
+    # ------------------------------------------------------------------
+    if apply_lsf:
+        if not hasattr(data_obj, 'channels_names') or data_obj.channels_names is None:
+            raise ValueError(
+                "apply_lsf=True requiere que data_obj tenga el atributo "
+                "channels_names. Asegúrate de cargar el dataset con Selection.load()."
+            )
+
+        L_lap = compute_laplacian_matrix(data_obj.channels_names, debug=debug)
+
+        if debug:
+            print(f"[LSF] Matriz Laplaciana precalculada para {len(data_obj.channels_names)} canales.")
+            print(f"[LSF] Aplicando LSF a {data_obj.X.shape[0]} ventanas...")
+
+        data_obj = EEGSubset({
+            "X":             apply_laplacian(data_obj.X, L_lap),
+            "y":             data_obj.y,
+            "sub":           data_obj.sub,
+            "trial":         data_obj.trial,
+            "run":           data_obj.run,
+            "mode":          data_obj.mode,
+            "channels_names": data_obj.channels_names,
+        })
+
+        if debug:
+            print(f"[LSF] Aplicación completada. Shape: {data_obj.X.shape}")
+
     # ------------------------------------------------------------------
     # Paso 0.5 (NUEVO): EA por sujeto
     # Se aplica sobre data_obj.X crudo, antes de split y normalización,
@@ -1384,12 +1435,13 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
         # Reemplazar X en data_obj con versión alineada
         # Usamos EEGSubset para no mutar el objeto original
         data_obj = EEGSubset({
-            "X":     X_aligned,
-            "y":     data_obj.y,
-            "sub":   data_obj.sub,
-            "trial": data_obj.trial,
-            "run":   data_obj.run,
-            "mode":  data_obj.mode,
+            "X":             X_aligned,
+            "y":             data_obj.y,
+            "sub":           data_obj.sub,
+            "trial":         data_obj.trial,
+            "run":           data_obj.run,
+            "mode":          data_obj.mode,
+            "channels_names": data_obj.channels_names,
         })
  
         if debug:
@@ -1593,6 +1645,7 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
     info["epochs_requested"]   = epochs
     info["best_epoch_idx"]     = best_epoch_idx
     info["ea_applied"]         = apply_ea     # trazabilidad
+    info["lsf_applied"]        = apply_lsf    # trazabilidad
  
     return modelo, history, channel_mean, channel_std, keras_split, test_run_sorted, info
 
@@ -1672,8 +1725,9 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
              dynamic_lr=False, Lr_grid=None, unfreeze_grid=None,
              patience_level="medium", monitor="val_loss",
              model_checkpoint=None,
-             apply_ea=False,       # NUEVO: activa Euclidean Alignment por sujeto
-             ea_eps=1e-3,          # NUEVO: regularización RELATIVA de eigenvalores de R
+             apply_ea=False,       # activa Euclidean Alignment por sujeto
+             ea_eps=1e-3,          # regularización RELATIVA de eigenvalores de R
+             apply_lsf=False,      # NUEVO: Surface Laplacian Filter antes de normalizar
              ):
     """
     Fine-tuning de EEGNet para un sujeto específico.
@@ -1693,7 +1747,18 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
         Umbral RELATIVO para eigenvalores de R: cualquier eigenvalor menor
         a `eigvals.max() * ea_eps` se regulariza antes de invertir. Al ser
         relativo, funciona sin importar la escala/unidades de la señal.
- 
+
+    apply_lsf : bool (default False)
+        Si True, aplica el Small Laplacian Filter (Nunez et al., 1997)
+        sobre dataset_fine.X y test_run.X ANTES de EA y normalización.
+        La matriz L se precalcula a partir de lsf_channels.
+
+        El pipeline completo con ambos activos es:
+            X_crudo → L @ X → R_invsqrt @ X → normalizar(mean, std) → Keras
+
+        Los nombres de canales se leen automáticamente desde
+        dataset_fine.channels_names (propagado desde Selection.pick_fine()).
+
     Retorna
     -------
     model_ft, history, mean, std, keras_split_fine, info, ea_matrix
@@ -1725,6 +1790,50 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
         )
  
     # ------------------------------------------------------------------
+    # Paso 0.25 (NUEVO): Surface Laplacian Filter
+    # Se aplica sobre X CRUDO, antes de EA y normalización, para que
+    # mean/std se calculen sobre señales ya filtradas espacialmente.
+    # La matriz L es estática: se precalcula una vez por llamada.
+    # ------------------------------------------------------------------
+    if apply_lsf:
+        if not hasattr(dataset_fine, 'channels_names') or dataset_fine.channels_names is None:
+            raise ValueError(
+                "apply_lsf=True requiere que dataset_fine tenga el atributo "
+                "channels_names. Propágalo al construir el EEGSubset desde pick_fine()."
+            )
+
+        L_lap = compute_laplacian_matrix(dataset_fine.channels_names, debug=debug)
+
+        if debug:
+            print(f"[LSF] Aplicando Laplacian filter a dataset_fine "
+                  f"({dataset_fine.X.shape[0]} ventanas)...")
+
+        dataset_fine = EEGSubset({
+            "X":             apply_laplacian(dataset_fine.X, L_lap),
+            "y":             dataset_fine.y,
+            "sub":           dataset_fine.sub,
+            "trial":         dataset_fine.trial,
+            "run":           dataset_fine.run,
+            "mode":          dataset_fine.mode,
+            "channels_names": dataset_fine.channels_names,
+        })
+
+        # Aplicar también al test_run si existe
+        if test_run is not None:
+            test_run = EEGSubset({
+                "X":             apply_laplacian(test_run.X, L_lap),
+                "y":             test_run.y,
+                "sub":           test_run.sub,
+                "trial":         test_run.trial,
+                "run":           test_run.run,
+                "mode":          test_run.mode,
+                "channels_names": test_run.channels_names,
+            })
+
+        if debug:
+            print(f"[LSF] Aplicación completada.")
+
+    # ------------------------------------------------------------------
     # Paso 0.5 (NUEVO): Euclidean Alignment
     # Debe aplicarse sobre X CRUDO, antes de cualquier normalización,
     # para que mean/std calculados después sean consistentes con online.
@@ -1742,23 +1851,25 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
  
         # Alinear fine
         dataset_fine = EEGSubset({
-            "X":     apply_ea_transform(dataset_fine.X, R_invsqrt),
-            "y":     dataset_fine.y,
-            "sub":   dataset_fine.sub,
-            "trial": dataset_fine.trial,
-            "run":   dataset_fine.run,
-            "mode":  dataset_fine.mode,
+            "X":             apply_ea_transform(dataset_fine.X, R_invsqrt),
+            "y":             dataset_fine.y,
+            "sub":           dataset_fine.sub,
+            "trial":         dataset_fine.trial,
+            "run":           dataset_fine.run,
+            "mode":          dataset_fine.mode,
+            "channels_names": dataset_fine.channels_names,
         })
  
         # Alinear test_run si existe
         if test_run is not None:
             test_run = EEGSubset({
-                "X":     apply_ea_transform(test_run.X, R_invsqrt),
-                "y":     test_run.y,
-                "sub":   test_run.sub,
-                "trial": test_run.trial,
-                "run":   test_run.run,
-                "mode":  test_run.mode,
+                "X":             apply_ea_transform(test_run.X, R_invsqrt),
+                "y":             test_run.y,
+                "sub":           test_run.sub,
+                "trial":         test_run.trial,
+                "run":           test_run.run,
+                "mode":          test_run.mode,
+                "channels_names": test_run.channels_names,
             })
  
         if debug:
@@ -1972,7 +2083,8 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
     info["batch_size"]         = batch_size
     info["epochs_requested"]   = epochs
     info["unfreeze_grid"]      = unfreeze_grid
-    info["ea_applied"]         = apply_ea   # NUEVO: trazabilidad en CSV
+    info["ea_applied"]         = apply_ea    # trazabilidad en CSV
+    info["lsf_applied"]        = apply_lsf   # trazabilidad en CSV
  
     return model_ft, history, mean, std, keras_split_fine, info, ea_matrix
  
@@ -3533,3 +3645,144 @@ def diagnose_ea(fine_subset, test_subset, debug=True):
     print("=" * 50)
 
     return R_invsqrt
+
+
+# ============================================================
+# SURFACE LAPLACIAN FILTER (Small Laplacian)
+# Nunez et al., 1997 — "EEG coherency I: statistics, reference electrode,
+# volume conduction, Laplacians, cortical imaging, and interpretation
+# at multiple scales"
+#
+# Suprime la conducción de volumen restando a cada canal la media
+# ponderada de sus vecinos inmediatos del montaje 10-10.
+# En runtime es una sola multiplicación matricial L @ X:
+#   latencia < 0.1 ms para cualquier número de canales razonable.
+#
+# FLUJO DE USO:
+#   1. Una vez, al iniciar:  L = compute_laplacian_matrix(channel_names)
+#   2. Offline/online:       X_lap = apply_laplacian(X, L)
+#   3. En eeg_train/eeg_fine: usar apply_lsf=True + lsf_channels=channel_names
+# ============================================================
+
+# Vecindades del montaje 10-10 para canales comunes de MI-EEG.
+# Clave: nombre normalizado (sin puntos).
+# Valor: lista de vecinos inmediatos en el eje lateral de la franja C.
+
+_LSF_NEIGHBORS_1010 = {
+    # Franja C — eje lateral
+    "C5":  ["C3"],
+    "C3":  ["C5", "C1"],
+    "C1":  ["C3", "Cz"],
+    "Cz":  ["C1", "C2"],
+    "C2":  ["Cz", "C4"],
+    "C4":  ["C2", "C6"],
+    "C6":  ["C4"],
+    # Franja FC
+    "FC5": ["FC3", "C5"],
+    "FC3": ["FC5", "FC1", "C3"],
+    "FC1": ["FC3", "FCz", "C1"],
+    "FCz": ["FC1", "FC2", "Cz"],
+    "FC2": ["FCz", "FC4", "C2"],
+    "FC4": ["FC2", "FC6", "C4"],
+    "FC6": ["FC4", "C6"],
+    # Franja CP
+    "CP5": ["CP3", "C5"],
+    "CP3": ["CP5", "CP1", "C3"],
+    "CP1": ["CP3", "CPz", "C1"],
+    "CPz": ["CP1", "CP2", "Cz"],
+    "CP2": ["CPz", "CP4", "C2"],
+    "CP4": ["CP2", "CP6", "C4"],
+    "CP6": ["CP4", "C6"],
+}
+
+
+def _normalize_ch(name):
+    """Normaliza nombre de canal: 'C3..' → 'C3', 'Cz..' → 'Cz'."""
+    return name.replace(".", "").replace(" ", "").strip()
+
+
+def compute_laplacian_matrix(channel_names, debug=False):
+    """
+    Construye la matriz L del Small Laplacian para un subconjunto
+    de canales del montaje 10-10.
+
+    Parámetros
+    ----------
+    channel_names : list[str]
+        Nombres de canales en el mismo orden que el eje 1 de X.
+        Acepta formato BCI2000 con puntos extra (p.ej. 'C3..').
+
+    debug : bool
+        Si True, imprime vecinos encontrados y la matriz L.
+
+    Retorna
+    -------
+    L : np.ndarray, shape (C, C)  dtype float32
+        Matriz Laplaciana precalculada.
+        Uso offline (batch): np.einsum('cd,ndt->nct', L, X)
+        Uso online (ventana): L @ X
+
+    Notas
+    -----
+    - Canal con un solo vecino en el subconjunto: peso -1 (diferencia
+      simple), comportamiento correcto para extremos de la franja.
+    - Canal sin ningún vecino en el subconjunto: se deja como identidad
+      y se emite un warning — no se filtra, pero tampoco rompe nada.
+    - La matriz es estática; calcúlala UNA VEZ y reutilízala en todos
+      los folds, sujetos y ventanas online.
+    """
+    norm_names = [_normalize_ch(ch) for ch in channel_names]
+    C = len(norm_names)
+    ch_idx = {name: i for i, name in enumerate(norm_names)}
+
+    L = np.zeros((C, C), dtype=np.float32)
+
+    for i, ch in enumerate(norm_names):
+        all_neighbors   = _LSF_NEIGHBORS_1010.get(ch, [])
+        present_neighbors = [n for n in all_neighbors if n in ch_idx]
+        n_nb = len(present_neighbors)
+
+        if n_nb == 0:
+            warnings.warn(
+                f"[LSF] Canal '{ch}' no tiene vecinos conocidos en el "
+                "subconjunto. Se deja sin filtrar (fila identidad). "
+                "Agrega sus vecinos a _LSF_NEIGHBORS_1010 si es necesario."
+            )
+            L[i, i] = 1.0
+        else:
+            L[i, i] = 1.0
+            w = 1.0 / n_nb
+            for nb in present_neighbors:
+                L[i, ch_idx[nb]] = -w
+
+        if debug:
+            w_show = -1.0 / n_nb if n_nb > 0 else 0.0
+            print(f"  {ch:>6}: vecinos_activos={present_neighbors}  peso={w_show:.3f}")
+
+    if debug:
+        print(f"\n[LSF] Matriz L ({C}×{C}):")
+        print(np.round(L, 3))
+
+    return L
+
+
+def apply_laplacian(X, L):
+    """
+    Aplica el filtro Laplaciano a una ventana o a un batch.
+
+    Parámetros
+    ----------
+    X : np.ndarray
+        (N, C, T)  — batch  (entrenamiento / evaluación)
+        (C, T)     — ventana única (online)
+
+    L : np.ndarray, shape (C, C)
+        Salida de compute_laplacian_matrix().
+
+    Retorna
+    -------
+    X_lap : np.ndarray, misma shape que X
+    """
+    if X.ndim == 2:          # online: (C, T)
+        return L @ X
+    return np.einsum('cd,ndt->nct', L, X)   # batch: (N, C, T)
