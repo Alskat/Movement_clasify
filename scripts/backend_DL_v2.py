@@ -23,7 +23,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, LearningRateScheduler
 from tensorflow.keras.models import clone_model
 
-project_path = "G:\\Mi unidad\\Tesis v1\\Movement_clasify"
+project_path = r'C:\Users\Josjuan\Desktop\Tesis\Movement_clasify' 
 
 #Agregamos los modelos EEGnet a nuestro path
 models_path = os.path.join(project_path, 'models')
@@ -36,7 +36,8 @@ else:
     print("No se encontró directorio de modelos en", models_path)
 
 #Personales
-from EEGModels import EEGNet  
+from EEGModels import EEGNet
+from models import ATCNet_ as ATCNet, EEGNeX_8_32  
 
 #Para evaluar
 import matplotlib.pyplot as plt
@@ -191,10 +192,30 @@ class Selection:
             17: dict(pick=[0,3,4], fusionar=False, binary=False,
                      allowed_modes = ["HF_I"]),
 
+            # 🔹 BINARIO-IMAGINARIO
+
+            18: dict(pick=[0,1,2,3,4], fusionar=True, binary=True,
+                    allowed_modes = ["LR_I", "HF_I"]),
+
+            # 🔹 IZQ-DER IMAGINARIO       
+        
+            19: dict(pick=[1,2], fusionar=False, binary=False,
+                    allowed_modes = ["LR_I"]),
+
             # 🔹 REST-RIGHT-FEET (moabb)
 
-            18: dict(pick = [0, 1, 4], fusionar = False, binary = False,
-                    allowed_modes = ["LR_I", "HF_I"])
+            20: dict(pick = [0, 1, 4], fusionar = False, binary = False,
+                    allowed_modes = ["LR_I", "HF_I"]),
+
+            # 🔹 REST-IZQ-DER HGD (solo motor, sin fusión)
+
+            21: dict(pick=[0, 5, 6], fusionar=False, binary=False,
+                    allowed_modes = ["HGD_LRRF_M"]),
+
+            # 🔹 IZQ-DER HGD (solo motor, sin fusión)
+
+            22: dict(pick=[5, 6], fusionar=False, binary=False,
+                    allowed_modes = ["HGD_LRRF_M"]),
 
         }
 
@@ -575,9 +596,10 @@ class Selection:
             print(f"✔ Canales seleccionados: {self.channels_names}")
             print(f"Nuevo shape X: {self.X.shape}")
             
-    def pipeline(self, n=None, binary = False):
-        #El pipeline principal consiste en aplicar un pick y luego una fusión, cosas que ya tenemos en otras clases 
+    def pipeline(self, n=None, binary = False, filter_modes=None):
+        #El pipeline principal consiste en aplicar un pick y luego una fusión, cosas que ya tenemos en otras clases
         #n sólo es para limitar la cantidad de datos totales, no recuerdo porque lo quise añadir pero ahí está
+        #filter_modes: lista de modos a conservar tras el pipeline, e.g. ["LR_I"] para quedarse sólo con MI
         if self.binary is not None:
             binary = self.binary
         # Paso 1: Pickeo 
@@ -622,9 +644,11 @@ class Selection:
 
             self._build(X, y_final, sub, trial, run, mode)
 
-            return  
+            if filter_modes is not None:
+                self.filter_modes(filter_modes)
+            return
 
-        # --- 3) fusionar clases y remapear las etiquetas--- 
+        # --- 3) fusionar clases y remapear las etiquetas---
 
         if self.fusionar:
             y_final, class_names_final = self.semantic_fusion(y)
@@ -656,10 +680,43 @@ class Selection:
 
         self._build(X, y_final, sub, trial, run, mode) #Ahora construimos los atributos principaples
 
-        
+        if filter_modes is not None:
+            self.filter_modes(filter_modes)
 
+    def filter_modes(self, keep_modes):
+        """
+        Filtra los datos para conservar sólo los modos indicados.
+        Útil para entrenar con picks fusionados (MI+MR) pero hacer
+        fine-tuning y test sólo con MI.
 
-    
+        Uso típico:
+            sel = Selection(pick=4)          # pick fusionado MI+MR
+            sel.load(path); sel.pipeline()
+            sel.filter_modes(["LR_I"])       # quedarse sólo con MI
+
+        Parámetros
+        ----------
+        keep_modes : list[str]
+            Modos a conservar, e.g. ["LR_I"], ["HF_I"], ["LR_I","HF_I"].
+        """
+        mask = np.isin(self.mode, keep_modes)
+
+        if mask.sum() == 0:
+            raise ValueError(
+                f"filter_modes: no quedaron muestras con modos {keep_modes}. "
+                f"Modos presentes: {list(np.unique(self.mode))}"
+            )
+
+        self.X = self.X[mask]
+        self.y = self.y[mask]
+        self.sub = self.sub[mask]
+        self.trial = self.trial[mask]
+        self.run = self.run[mask]
+        self.mode = self.mode[mask]
+        self.n_samples = self.X.shape[0]
+
+        return self
+
     def semantic_fusion(self, y): #Función bella toda bonita no la toquen
         """
         Fusiona clases usando las etiquetas originales.
@@ -1057,26 +1114,66 @@ def prepare_keras_split(split):
         split.mode.train,split.mode.val,split.mode.test
     )  
 
-#4 Construir modelo EEGnet
+#4 Construir modelo
 def build_eegnet(classes, chans, signal_len,
                  dropout_rate=0.5, kern_length=64,
                  F1=8, D=2, norm_rate=0.25,
-                 dropout_type='Dropout'):
-    
-    #En esta construimos nuestro modelo EEGnet
-    F2 = F1 * D
-    model = EEGNet(
-        nb_classes=classes,
-        Chans=chans,
-        Samples=signal_len,
-        dropoutRate=dropout_rate,
-        kernLength=kern_length,
-        F1=F1,
-        D=D,
-        F2=F2,
-        norm_rate=norm_rate,
-        dropoutType=dropout_type
-    )
+                 dropout_type='Dropout',
+                 model_type='eegnet'):
+
+    model_type = model_type.lower()
+
+    if model_type == 'eegnet':
+        F2 = F1 * D
+        model = EEGNet(
+            nb_classes=classes,
+            Chans=chans,
+            Samples=signal_len,
+            dropoutRate=dropout_rate,
+            kernLength=kern_length,
+            F1=F1,
+            D=D,
+            F2=F2,
+            norm_rate=norm_rate,
+            dropoutType=dropout_type
+        )
+
+    elif model_type == 'eegnex':
+        from tensorflow.keras.layers import Input, Permute
+        from tensorflow.keras.models import Model as KerasModel
+        inner = EEGNeX_8_32(
+            n_timesteps=signal_len,
+            n_features=chans,
+            n_outputs=classes,
+        )
+        inp = Input(shape=(chans, signal_len, 1))
+        x = Permute((3, 1, 2))(inp)
+        out = inner(x)
+        model = KerasModel(inp, out)
+
+    elif model_type == 'atcnet':
+        from tensorflow.keras.layers import Input, Permute
+        from tensorflow.keras.models import Model as KerasModel
+        inner = ATCNet(
+            n_classes=classes,
+            in_chans=chans,
+            in_samples=signal_len,
+            n_windows=5,
+            eegn_F1=F1,
+            eegn_D=D,
+            eegn_kernelSize=kern_length,
+            eegn_poolSize=4,   # adecuado para 320 muestras (160Hz × 2s)
+            eegn_dropout=dropout_rate,
+        )
+        inp = Input(shape=(chans, signal_len, 1))
+        x = Permute((3, 1, 2))(inp)
+        out = inner(x)
+        model = KerasModel(inp, out)
+
+    else:
+        raise ValueError(f"model_type '{model_type}' no soportado. Usa 'eegnet', 'eegnex' o 'atcnet'.")
+
+    print(f"Modelo: {model_type} | {classes} clases, {chans} ch, {signal_len} samples, {len(model.layers)} capas")
     return model
 
 def runfolds(
@@ -1298,20 +1395,21 @@ def runfolds(
     return data_fine_folds, data_test_folds, fold_table
 
 def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
-              classes=None, epochs=20,
+              classes=None, epochs=None,
               debug=False, use_class_weight=True, sfreq=160,
-              kern_length=None, F1=8, make_test=False, batch=16,
+              kern_length=None, F1=None, make_test=False, batch=16,
               undersample_rest=False, test_run=None, checkpoint_path=None,
-              Lr=1e-3, dynamic_lr=False, Lr_grid=None,
-              patience_level="medium", monitor="val_loss", dropout_rate=0.5,
-              apply_ea=False,    # EA por sujeto antes de normalizar
+              Lr=None, dynamic_lr=False, Lr_grid=None,
+              patience_level="medium", monitor="val_loss", dropout_rate=None,
+              apply_ea=None,     # EA por sujeto antes de normalizar
               ea_eps=1e-3,       # regularización RELATIVA de eigenvalores
-              apply_lsf=False,   # NUEVO: Surface Laplacian Filter antes de normalizar
+              apply_lsf=False,   # Aplicar filtro laplaciano de superficie
+              model_type='eegnet',  # 'eegnet', 'eegnex' o 'atcnet'
               ):
     """
     Entrenamiento general de EEGNet.
  
-    Parámetros nuevos
+    Parámetros de transformadas espaciales:
     -----------------
     apply_ea : bool (default False)
         Si True, aplica Euclidean Alignment (He & Wu 2019) a cada sujeto
@@ -1344,7 +1442,23 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
     """
  
     # ------------------------------------------------------------------
-    # Paso 0: variables (sin cambios)
+    # Defaults por model_type (sentinel None = no especificado por usuario)
+    # ------------------------------------------------------------------
+    if model_type == 'atcnet':
+        if F1           is None: F1           = 16
+        if epochs       is None: epochs       = 60
+        if Lr           is None: Lr           = 1e-4
+        if dropout_rate is None: dropout_rate = 0.25
+        if apply_ea     is None: apply_ea     = True
+    else:  # eegnet / eegnex
+        if F1           is None: F1           = 8
+        if epochs       is None: epochs       = 20
+        if Lr           is None: Lr           = 1e-3
+        if dropout_rate is None: dropout_rate = 0.5
+        if apply_ea     is None: apply_ea     = False
+
+    # ------------------------------------------------------------------
+    # Paso 0: Ajustar variables
     # ------------------------------------------------------------------
     monitor_mode = "min" if monitor.endswith("loss") else "max"
  
@@ -1364,7 +1478,7 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
         )
  
     # ------------------------------------------------------------------
-    # Paso 0.25 (NUEVO): Surface Laplacian Filter por sujeto
+    # Paso 1: Surface Laplacian Filter por sujeto
     # Se aplica sobre X CRUDO, antes de EA y normalización.
     # La matriz L es estática (no depende del sujeto) y se precalcula
     # una sola vez para todos los folds.
@@ -1376,14 +1490,14 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
                 "channels_names. Asegúrate de cargar el dataset con Selection.load()."
             )
 
-        L_lap = compute_laplacian_matrix(data_obj.channels_names, debug=debug)
+        L_lap = compute_laplacian_matrix(data_obj.channels_names, debug=debug) #Calcula la matriz laplaciana
 
         if debug:
             print(f"[LSF] Matriz Laplaciana precalculada para {len(data_obj.channels_names)} canales.")
             print(f"[LSF] Aplicando LSF a {data_obj.X.shape[0]} ventanas...")
 
         data_obj = EEGSubset({
-            "X":             apply_laplacian(data_obj.X, L_lap),
+            "X":             apply_laplacian(data_obj.X, L_lap), #Aplica la transformada a cada ventana
             "y":             data_obj.y,
             "sub":           data_obj.sub,
             "trial":         data_obj.trial,
@@ -1396,7 +1510,7 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
             print(f"[LSF] Aplicación completada. Shape: {data_obj.X.shape}")
 
     # ------------------------------------------------------------------
-    # Paso 0.5 (NUEVO): EA por sujeto
+    # Paso 1.2: EA por sujeto
     # Se aplica sobre data_obj.X crudo, antes de split y normalización,
     # para que channel_mean/channel_std se calculen sobre datos alineados.
     # ------------------------------------------------------------------
@@ -1448,7 +1562,7 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
             print(f"[EA] Alineación completada: {n_ok} sujetos OK, {n_bad} fallidos.")
  
     # ------------------------------------------------------------------
-    # Paso 1: split (sin cambios)
+    # Paso 3: split de X para train y val (test va a ser sujetos nuevos)
     # ------------------------------------------------------------------
     split, info = split_eeg(
         data_obj, mode=mode,
@@ -1457,13 +1571,13 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
     )
  
     # ------------------------------------------------------------------
-    # Paso 2: normalización — opera sobre datos ya alineados si apply_ea
+    # Paso 4: normalización — opera sobre datos ya alineados si apply_ea
     # channel_mean y channel_std serán consistentes con fine-tuning
     # ------------------------------------------------------------------
     norm_split, channel_mean, channel_std = normalizar_split(split)
  
     # ------------------------------------------------------------------
-    # Paso 3: reshape Keras (sin cambios)
+    # Paso 5: reshape de Keras para que sea compatible con eegnet
     # ------------------------------------------------------------------
     keras_split = prepare_keras_split(norm_split)
  
@@ -1472,7 +1586,7 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
               "Después de ajustar para Keras:", keras_split.X.train.shape)
  
     # ------------------------------------------------------------------
-    # Paso 3.5: undersampling (sin cambios)
+    # Paso 6: undersampling si es que lo pide
     # ------------------------------------------------------------------
     if undersample_rest:
         X_train, y_train, _, _, _, _ = apply_undersample_rest(keras_split)
@@ -1485,7 +1599,7 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
               dict(zip(*np.unique(y_train, return_counts=True))))
  
     # ------------------------------------------------------------------
-    # Paso 4: construir modelo (sin cambios)
+    # Paso 7: construir modelo eegnet
     # ------------------------------------------------------------------
     chans      = X_train.shape[1]
     signal_len = X_train.shape[2]
@@ -1494,11 +1608,12 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
  
     modelo = build_eegnet(
         classes, chans, signal_len,
-        kern_length=kern_length, F1=F1, dropout_rate=dropout_rate
+        kern_length=kern_length, F1=F1, dropout_rate=dropout_rate,
+        model_type=model_type
     )
  
     # ------------------------------------------------------------------
-    # Paso 5: compilar (sin cambios)
+    # Paso 8: compilar y agregar callbacks (early stopping y checkpoint)
     # ------------------------------------------------------------------
     modelo.compile(
         loss='sparse_categorical_crossentropy',
@@ -1547,7 +1662,7 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
         )
  
     # ------------------------------------------------------------------
-    # Paso 6: entrenar (sin cambios)
+    # Paso 9: entrenar: aplica balance de clases de ser necesario 
     # ------------------------------------------------------------------
     verbose = 1 if debug else 0
  
@@ -1571,30 +1686,48 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
     )
  
     # ------------------------------------------------------------------
-    # Paso 7: evaluación (sin cambios)
-    # test_run ya viene alineado externamente si apply_ea=True en el
-    # notebook, o se evalúa con normalize_run igual que antes
+    # Paso 10: evaluación:
+    # Aplica LSF y EA al test_run si corresponde, consistente con el
+    # pipeline de entrenamiento.
     # ------------------------------------------------------------------
     test_run_sorted = None
- 
+
     if make_test:
         test_loss, test_acc = modelo.evaluate(
             keras_split.X.test, keras_split.y.test, verbose=0
         )
         print(f"Test loss={test_loss:.4f}, acc={test_acc:.4f}")
- 
+
     elif test_run is not None:
         if not isinstance(test_run, (list, tuple)):
             test_run = [test_run]
- 
+
         if debug:
             print(f"\n[8] Evaluando {len(test_run)} subsets de test_run...")
- 
+
         scored = []
         for i, subset in enumerate(test_run):
-            X_rub_i = normalize_run(subset, channel_mean, channel_std)
+
+            if apply_lsf:
+                L_lap_eval = compute_laplacian_matrix(subset.channels_names, debug=False)
+                subset = EEGSubset({
+                    "X":             apply_laplacian(subset.X, L_lap_eval),
+                    "y":             subset.y,
+                    "sub":           subset.sub,
+                    "trial":         subset.trial,
+                    "run":           subset.run,
+                    "mode":          subset.mode,
+                    "channels_names": subset.channels_names,
+                })
+
+            if apply_ea:
+                R_invsqrt_i, _ = compute_ea_matrix(subset.X, eps=ea_eps, debug=False)
+                X_rub_i = normalize_run_ea(subset, R_invsqrt_i, channel_mean, channel_std)
+            else:
+                X_rub_i = normalize_run(subset, channel_mean, channel_std)
+
             y_rub_i = subset.y
- 
+
             loss_i, acc_i = modelo.evaluate(X_rub_i, y_rub_i, verbose=0)
  
             unique_sub_i = np.unique(subset.sub)
@@ -1625,7 +1758,7 @@ def eeg_train(data_obj, mode="subject", test_size=0.1, val_size=0.1,
         print(f"Validation loss={test_loss:.4f}, acc={test_acc:.4f}")
  
     # ------------------------------------------------------------------
-    # Paso 8: info (sin cambios + ea_applied)
+    # Paso 11: info: guardar información relevante
     # ------------------------------------------------------------------
     monitor_values = history.history[monitor]
  
@@ -1727,7 +1860,8 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
              model_checkpoint=None,
              apply_ea=False,       # activa Euclidean Alignment por sujeto
              ea_eps=1e-3,          # regularización RELATIVA de eigenvalores de R
-             apply_lsf=False,      # NUEVO: Surface Laplacian Filter antes de normalizar
+             apply_lsf=False,      # Surface Laplacian Filter antes de normalizar
+             dynamic_unfreeze=False,  # descongelamiento progresivo estilo Wang
              ):
     """
     Fine-tuning de EEGNet para un sujeto específico.
@@ -1773,7 +1907,7 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
     """
  
     # ------------------------------------------------------------------
-    # Paso 0: variables y validaciones (sin cambios)
+    # Paso 0: variables y validaciones 
     # ------------------------------------------------------------------
     monitor_mode = "min" if monitor.endswith("loss") else "max"
  
@@ -1790,7 +1924,7 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
         )
  
     # ------------------------------------------------------------------
-    # Paso 0.25 (NUEVO): Surface Laplacian Filter
+    # Paso 1: Surface Laplacian Filter
     # Se aplica sobre X CRUDO, antes de EA y normalización, para que
     # mean/std se calculen sobre señales ya filtradas espacialmente.
     # La matriz L es estática: se precalcula una vez por llamada.
@@ -1834,7 +1968,7 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
             print(f"[LSF] Aplicación completada.")
 
     # ------------------------------------------------------------------
-    # Paso 0.5 (NUEVO): Euclidean Alignment
+    # Paso 2: Euclidean Alignment
     # Debe aplicarse sobre X CRUDO, antes de cualquier normalización,
     # para que mean/std calculados después sean consistentes con online.
     # ------------------------------------------------------------------
@@ -1885,7 +2019,7 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
     }
  
     # ------------------------------------------------------------------
-    # Paso 1: split (sin cambios)
+    # Paso 3: splitear el dataset nuevamente, ahora por trials entre los runs de entrenamiento y validación
     # ------------------------------------------------------------------
     split_fine, info = split_eeg(
         dataset_fine, mode="trial",
@@ -1899,8 +2033,7 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
               "Tamaño del test:", split_fine.X.test.shape)
  
     # ------------------------------------------------------------------
-    # Paso 2: normalización (sin cambios en lógica, ahora opera sobre
-    # datos ya alineados si apply_ea=True)
+    # Paso 4: normalización 
     # ------------------------------------------------------------------
     if normalize:
         if mean is None or std is None:
@@ -1923,12 +2056,12 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
         norm_split, mean, std = normalizar_split(split_fine)
  
     # ------------------------------------------------------------------
-    # Paso 3: reshape Keras (sin cambios)
+    # Paso 5: reshape Keras
     # ------------------------------------------------------------------
     keras_split_fine = prepare_keras_split(norm_split)
  
     # ------------------------------------------------------------------
-    # Paso 3.5: undersampling (sin cambios)
+    # Paso 5.5: undersampling 
     # ------------------------------------------------------------------
     if undersample_rest:
         X_fine_train, y_fine_train, _, _, _, _ = apply_undersample_rest(keras_split_fine)
@@ -1941,24 +2074,40 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
               "Después de ajustar para Keras:", X_fine_train.shape)
  
     # ------------------------------------------------------------------
-    # Paso 4: clonar modelo (sin cambios)
+    # Paso 6: clonar modelo y ajustar capas entrenables
     # ------------------------------------------------------------------
     model_ft = clone_model(base)
     model_ft.set_weights(base.get_weights())
- 
+
     callbacks = []
- 
-    if unfreeze_last_n is None or unfreeze_last_n > len(model_ft.layers):
-        for layer in model_ft.layers:
-            layer.trainable = True
+
+    # Obtener TODAS las capas (incluyendo submodelos wrapeados)
+    all_layers = []
+    for layer in model_ft.layers:
+        if hasattr(layer, 'layers'):
+            all_layers.extend(layer.layers)
+        else:
+            all_layers.append(layer)
+    n_layers = len(all_layers)
+
+    if not dynamic_unfreeze:
+        if unfreeze_last_n is None or unfreeze_last_n > n_layers:
+            for layer in all_layers:
+                layer.trainable = True
+        else:
+            for layer in all_layers:
+                layer.trainable = False
+            for layer in all_layers[-unfreeze_last_n:]:
+                layer.trainable = True
+        trainable_count = sum(1 for l in all_layers if l.trainable)
+        print(f"{trainable_count} capas desbloqueadas de {n_layers} (total, incluyendo submodelos)")
     else:
-        for layer in model_ft.layers:
-            layer.trainable = False
-        for layer in model_ft.layers[-unfreeze_last_n:]:
+        for layer in all_layers:
             layer.trainable = True
+        print(f"Dynamic unfreeze: {n_layers}→{n_layers//2}→3 capas")
  
     # ------------------------------------------------------------------
-    # Paso 5: compilar (sin cambios)
+    # Paso 7: compilar 
     # ------------------------------------------------------------------
     model_ft.compile(
         loss='sparse_categorical_crossentropy',
@@ -1980,7 +2129,7 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
     verbose = 1 if debug else 0
  
     # ------------------------------------------------------------------
-    # Paso 6: callbacks (sin cambios)
+    # Paso 8: callbacks nuevamente
     # ------------------------------------------------------------------
     if model_checkpoint is None:
         model_checkpoint = "EEGNet_finetuned_subject.keras"
@@ -2022,21 +2171,58 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
         )
  
     # ------------------------------------------------------------------
-    # Paso 7: entrenamiento (sin cambios)
+    # Paso 9: entrenamiento: SSFT
     # ------------------------------------------------------------------
-    history = model_ft.fit(
-        X_fine_train, y_fine_train,
-        validation_data=(keras_split_fine.X.val, keras_split_fine.y.val),
-        callbacks=callbacks,
-        epochs=epochs,
-        batch_size=batch_size,
-        class_weight=class_weight,
-        verbose=verbose,
-    )
+    if dynamic_unfreeze and epochs >= 6:
+        phase_epochs = [epochs // 3, epochs // 3, epochs - 2 * (epochs // 3)]
+        unfreeze_phases = [n_layers, max(n_layers // 2, 3), 3]
+
+        all_history = {"loss": [], "val_loss": [], "accuracy": [], "val_accuracy": []}
+
+        for phase_i, (ph_epochs, ph_unfreeze) in enumerate(zip(phase_epochs, unfreeze_phases)):
+            for layer in all_layers:
+                layer.trainable = False
+            for layer in all_layers[-ph_unfreeze:]:
+                layer.trainable = True
+
+            lr_phase = lr if phase_i == 0 else lr * (0.5 ** phase_i)
+            model_ft.compile(
+                loss='sparse_categorical_crossentropy',
+                optimizer=Adam(learning_rate=lr_phase),
+                metrics=['accuracy']
+            )
+
+            if debug:
+                print(f"  Fase {phase_i+1}: {ph_unfreeze} capas, lr={lr_phase:.1e}, {ph_epochs} epochs")
+
+            h = model_ft.fit(
+                X_fine_train, y_fine_train,
+                validation_data=(keras_split_fine.X.val, keras_split_fine.y.val),
+                callbacks=callbacks,
+                epochs=ph_epochs,
+                batch_size=batch_size,
+                class_weight=class_weight,
+                verbose=verbose,
+            )
+            for k in all_history:
+                all_history[k].extend(h.history.get(k, []))
+
+        class _MergedHistory:
+            def __init__(self, d): self.history = d
+        history = _MergedHistory(all_history)
+    else:
+        history = model_ft.fit(
+            X_fine_train, y_fine_train,
+            validation_data=(keras_split_fine.X.val, keras_split_fine.y.val),
+            callbacks=callbacks,
+            epochs=epochs,
+            batch_size=batch_size,
+            class_weight=class_weight,
+            verbose=verbose,
+        )
  
     # ------------------------------------------------------------------
-    # Paso 8: evaluación en test (sin cambios en lógica;
-    # test_run ya está alineado si apply_ea=True)
+    # Paso 10: evaluación en test 
     # ------------------------------------------------------------------
     if make_test:
         print("Se realiza evaluación en el set del dataset.")
@@ -2065,7 +2251,7 @@ def eeg_fine(base, dataset_fine, mean=None, std=None, epochs=20, debug=False,
         print(f"[Fine-tune] Validation loss={test_loss:.4f}, acc={test_acc:.4f}")
  
     # ------------------------------------------------------------------
-    # Paso 9: info (sin cambios, más ea_applied)
+    # Paso 11: info: guardamos la información relevante
     # ------------------------------------------------------------------
     monitor_values = history.history[monitor]
  
@@ -2163,6 +2349,118 @@ def undersample(X, y, sub, rest_label=0, random_state=42, debug=False):
             print(f"  Clase {c}: {n}")
 
     return X_new, y_new, sub_new
+
+
+def build_list(
+    fine_obj,
+    test_obj,
+    subjects=None,
+    n_subjects=None,
+    seed=42,
+    debug=True
+):
+    """
+    Construye listas pareadas fine/test por sujeto, sin folds por run.
+
+    Para datasets donde cada sujeto tiene una sola sesion de fine-tuning
+    y una sola sesion de test (sin multiples runs), no se necesita
+    leave-one-run-out. Esta funcion simplemente asocia el fine del
+    sujeto i con su test correspondiente.
+
+    Retorna:
+        data_fine_list : lista de EEGSubset, uno por sujeto
+        data_test_list : lista de EEGSubset, uno por sujeto
+        fold_table     : DataFrame con metadata de cada par
+    """
+
+    required_attrs = ["X", "y", "sub", "trial", "run", "mode"]
+    for attr in required_attrs:
+        if not hasattr(fine_obj, attr) or getattr(fine_obj, attr) is None:
+            raise ValueError(f"fine_obj no tiene atributo '{attr}' o es None")
+        if not hasattr(test_obj, attr) or getattr(test_obj, attr) is None:
+            raise ValueError(f"test_obj no tiene atributo '{attr}' o es None")
+
+    if fine_obj.X.shape[1:] != test_obj.X.shape[1:]:
+        raise ValueError(
+            f"fine_obj y test_obj tienen distinta forma de ventana. "
+            f"fine: {fine_obj.X.shape[1:]} | test: {test_obj.X.shape[1:]}"
+        )
+
+    if hasattr(fine_obj, "label_map") and hasattr(test_obj, "label_map"):
+        if fine_obj.label_map != test_obj.label_map:
+            raise ValueError(
+                f"label_map distintos. fine: {fine_obj.label_map} | test: {test_obj.label_map}"
+            )
+
+    fine_subjects = np.unique(fine_obj.sub)
+    test_subjects = np.unique(test_obj.sub)
+    common_subjects = np.intersect1d(fine_subjects, test_subjects)
+
+    if len(common_subjects) == 0:
+        raise ValueError("No hay sujetos comunes entre fine_obj y test_obj.")
+
+    if subjects is None:
+        subjects = common_subjects
+        if n_subjects is not None:
+            if n_subjects > len(common_subjects):
+                raise ValueError(
+                    f"n_subjects={n_subjects} excede sujetos comunes: {len(common_subjects)}"
+                )
+            rng = np.random.default_rng(seed)
+            subjects = rng.choice(common_subjects, size=n_subjects, replace=False)
+
+    subjects = np.sort(np.asarray(subjects))
+
+    missing = [s for s in subjects if s not in common_subjects]
+    if missing:
+        raise ValueError(f"Sujetos no encontrados en ambos objetos: {missing}")
+
+    def make_subset(obj, mask):
+        return EEGSubset({
+            "X":     obj.X[mask],     "y":    obj.y[mask],
+            "sub":   obj.sub[mask],   "trial": obj.trial[mask],
+            "run":   obj.run[mask],   "mode":  obj.mode[mask],
+            "channels_names": getattr(obj, 'channels_names', None),
+        })
+
+    data_fine_list = []
+    data_test_list = []
+    rows = []
+
+    for subject in subjects:
+        fine_subset = make_subset(fine_obj, fine_obj.sub == subject)
+        test_subset = make_subset(test_obj, test_obj.sub == subject)
+
+        if len(fine_subset.y) == 0 or len(test_subset.y) == 0:
+            if debug:
+                print(f"Sujeto {subject} omitido: fine={len(fine_subset.y)}, test={len(test_subset.y)}")
+            continue
+
+        data_fine_list.append(fine_subset)
+        data_test_list.append(test_subset)
+
+        rows.append({
+            "idx": len(data_fine_list) - 1,
+            "subject": int(subject),
+            "n_fine": len(fine_subset.y),
+            "n_test": len(test_subset.y),
+            "fine_class_counts": str(dict(zip(*np.unique(fine_subset.y, return_counts=True)))),
+            "test_class_counts": str(dict(zip(*np.unique(test_subset.y, return_counts=True)))),
+        })
+
+    if len(data_fine_list) == 0:
+        raise ValueError("No se construyo ningun par fine/test valido.")
+
+    fold_table = pd.DataFrame(rows)
+
+    if debug:
+        print("\n" + "=" * 70)
+        print("BUILD_LIST: PAREJAS FINE/TEST CONSTRUIDAS")
+        print("=" * 70)
+        print(f"Sujetos: {len(data_fine_list)}")
+        print(fold_table[["idx", "subject", "n_fine", "n_test"]])
+
+    return data_fine_list, data_test_list, fold_table
 
 
 #==== Vibecoding abajo ====
@@ -2980,6 +3278,9 @@ def evaluate_moabb(
     plot=False,
     verbose=False,
     debug=False,
+    apply_ea=False,
+    ea_eps=1e-3,
+    apply_lsf=False,
 ):
     """
     Evalúa un modelo sobre múltiples EEGSubset de test y genera una tabla limpia
@@ -2989,6 +3290,25 @@ def evaluate_moabb(
         "run"     -> una fila por run/fold.
         "subject" -> una fila por sujeto con mean ± std.
         "all"     -> una sola fila global con mean ± std.
+
+    apply_ea : bool (default False)
+        Si True, alinea cada test_subset con Euclidean Alignment ANTES de
+        normalizar, usando su propia covarianza (R_invsqrt calculado sobre
+        sus propios datos, sin labels). Esto es necesario para evaluar de
+        forma justa un modelo entrenado con apply_ea=True en eeg_train,
+        ya que ese modelo aprendió sobre señales alineadas y, sin alinear
+        también el test, hay un desajuste de distribución que rompe la
+        evaluación (accuracy ≈ azar).
+
+    ea_eps : float
+        Umbral relativo de regularización de eigenvalores, igual que en
+        eeg_train / compute_ea_matrix.
+
+    apply_lsf : bool (default False)
+        Si True, aplica el mismo Small Laplacian Filter usado en
+        eeg_train (apply_lsf=True) a cada test_subset ANTES de EA y de
+        normalizar. Requiere que cada subset tenga `channels_names`.
+        Pipeline resultante: LSF -> (EA) -> normalizar.
 
     Columnas finales:
         subject | run | fined | accuracy | macro_f1 | balanced_accuracy
@@ -3043,7 +3363,28 @@ def evaluate_moabb(
         return "unknown"
 
     def _eval_subset(subset, title=""):
-        X_norm = normalize_run(subset, mean, std)
+        if apply_lsf:
+            if not hasattr(subset, 'channels_names') or subset.channels_names is None:
+                raise ValueError(
+                    "apply_lsf=True requiere que el test_subset tenga el "
+                    "atributo 'channels_names'."
+                )
+            L_lap = compute_laplacian_matrix(subset.channels_names, debug=debug)
+            subset = EEGSubset({
+                "X":             apply_laplacian(subset.X, L_lap),
+                "y":             subset.y,
+                "sub":           subset.sub,
+                "trial":         subset.trial,
+                "run":           subset.run,
+                "mode":          subset.mode,
+                "channels_names": subset.channels_names,
+            })
+
+        if apply_ea:
+            R_invsqrt, _ = compute_ea_matrix_from_subset(subset, eps=ea_eps, debug=debug)
+            X_norm = normalize_run_ea(subset, R_invsqrt, mean, std)
+        else:
+            X_norm = normalize_run(subset, mean, std)
         y_true = subset.y
 
         if debug:
@@ -3697,8 +4038,10 @@ _LSF_NEIGHBORS_1010 = {
 
 
 def _normalize_ch(name):
-    """Normaliza nombre de canal: 'C3..' → 'C3', 'Cz..' → 'Cz'."""
-    return name.replace(".", "").replace(" ", "").strip()
+    """Normaliza nombre de canal: 'C3..' → 'C3', 'Cz..' → 'Cz', 'Cp3.' → 'CP3', 'Cpz.' → 'CPz'."""
+    name = name.replace(".", "").replace(" ", "").strip()
+    name = name.upper().replace("Z", "z")
+    return name
 
 
 def compute_laplacian_matrix(channel_names, debug=False):

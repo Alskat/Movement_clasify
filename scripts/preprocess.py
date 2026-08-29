@@ -37,7 +37,7 @@ class Preprocessor:
         #Metadatos que necesitamos para el modelo 
 
         self.target_Fs = 160
-        self.target_duration= 1.0
+        self.target_duration= 2.0
         self.target_samples = int(self.target_Fs * self.target_duration)
         self.current_Fs = current_Fs
         self.current_duration = current_duration
@@ -72,12 +72,18 @@ class Preprocessor:
         self.std = params["std"]
         self.class_names = list(params["class_names"])
 
-        #Hacer lo mismo con el auxiliar 
+        self.ea_applied = bool(params["ea_applied"][0]) if "ea_applied" in params else False
+        self.R_invsqrt = params["R_invsqrt"] if self.ea_applied else None
+
+        if self.ea_applied:
+            print(f"[Preprocessor] EA activo — R_invsqrt shape={self.R_invsqrt.shape}")
+
+        #Hacer lo mismo con el auxiliar
         if use_bin:
 
             if aux_path is None:
                  raise ValueError( "Si use_bin=True, debes proporcionar aux_path.")
-            
+
 
             aux_model_path = Path(aux_path)
             aux_params_path = aux_model_path.with_suffix(".npz")
@@ -89,7 +95,10 @@ class Preprocessor:
             self.aux_mean = aux_params["mean"]
             self.aux_std = aux_params["std"]
             self.aux_class_names = list(aux_params["class_names"])
-            
+
+            self.aux_ea_applied = bool(aux_params["ea_applied"][0]) if "ea_applied" in aux_params else False
+            self.aux_R_invsqrt = aux_params["R_invsqrt"] if self.aux_ea_applied else None
+
             self.class_names = [ self.class_names[0],*self.aux_class_names]
             print(f"Clases finales: {self.class_names}")
                 
@@ -128,19 +137,20 @@ class Preprocessor:
                 axis=1
             )
 
-        #4) Normalizamos la señal 
+        #4) Euclidean Alignment + Normalización + Reshape
         if not self.use_bin:
+            if self.ea_applied:
+                window = self.R_invsqrt @ window
+
             window = self.normalize_window(
                 window,
                 mean=self.mean,
                 std=self.std
             )
 
-            #5) Reshapeamos a la forma que espersa Keras: 
-
             window = window[np.newaxis, :, :, np.newaxis]
 
-        #6) Aplicamos el modelo para obtener la predicción
+        #5) Aplicamos el modelo para obtener la predicción
 
         predicted_class, predicted_name, confidence, prediction = self.predict(window)
 
@@ -228,10 +238,14 @@ class Preprocessor:
 
          
         
-        else: 
+        else:
             #Hay que aplicar varios modelos, por lo cual debemos hacer unos pasos extras
 
-            window_bin = self.normalize_window(window,mean=self.mean,std=self.std) #Primero la ventana del modelo binario
+            window_bin = window.copy()
+            if self.ea_applied:
+                window_bin = self.R_invsqrt @ window_bin
+
+            window_bin = self.normalize_window(window_bin,mean=self.mean,std=self.std)
 
             window_bin = window_bin[np.newaxis, :, :, np.newaxis]
 
@@ -242,19 +256,23 @@ class Preprocessor:
             axis=1
             )[0]
 
-            if predicted_class_bin == 0: 
+            if predicted_class_bin == 0:
                 predicted_class = predicted_class_bin
                 prediction = prediction_bin
                 predicted_name = self.class_names[predicted_class_bin]
-                
+
                 confidence = np.max(prediction_bin)
-            else: 
-                #Debemos hacer el mismo proceso con la ventana ahora con el modelo auxiliar 
+            else:
+                #Debemos hacer el mismo proceso con la ventana ahora con el modelo auxiliar
 
-                window = self.normalize_window(window,mean=self.aux_mean,std=self.aux_std) #Primero la ventana del modelo binario
+                window_aux = window.copy()
+                if self.aux_ea_applied:
+                    window_aux = self.aux_R_invsqrt @ window_aux
 
-                window = window[np.newaxis, :, :, np.newaxis]
-                prediction = self.aux_model.predict(window, verbose=0)  
+                window_aux = self.normalize_window(window_aux,mean=self.aux_mean,std=self.aux_std)
+
+                window_aux = window_aux[np.newaxis, :, :, np.newaxis]
+                prediction = self.aux_model.predict(window_aux, verbose=0)  
 
                 aux_predicted_class = np.argmax(
                 prediction,

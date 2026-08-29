@@ -284,7 +284,8 @@ class EEGPreprocess:
                show_dropouts = 0, dropout_rate = 150e-6, dropout = True,
                save_df=True, channels = None,
                l_freq = None, h_freq =None, use_notch = None, notch_freqs = None, #Ahora los nuevos parámetros en caso de que no se hayan declarado antes
-               window_size = None, window_step = None, tmin = None, tmax = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
+               window_size = None, window_step = None, tmin = None, tmax = None,
+               dropbad_channels = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
         
         if self.channels is None: #Nuevas declaraciones en caso de que no se bhyaan declarado en el init
             self.channels = channels 
@@ -384,7 +385,21 @@ class EEGPreprocess:
                 n_before = len(epochs)
                 sub_counts_before[subject_id] = sub_counts_before.get(subject_id, 0) + n_before
 
-                epochs.drop_bad(reject=dict(eeg=dropout_rate), verbose = "Error")
+                if dropbad_channels is not None:
+                    ch_idx = [epochs.ch_names.index(ch) for ch in dropbad_channels if ch in epochs.ch_names]
+                    if len(ch_idx) == 0:
+                        raise ValueError(
+                            f"Ningún canal de dropbad_channels está en los datos. "
+                            f"dropbad_channels={dropbad_channels}, "
+                            f"canales disponibles={epochs.ch_names}"
+                        )
+                    data = epochs.get_data()
+                    max_amp = np.max(np.abs(data[:, ch_idx, :]), axis=(1, 2))
+                    bad_idx = np.where(max_amp > dropout_rate)[0]
+                    if len(bad_idx) > 0:
+                        epochs.drop(bad_idx, reason='DROPOUT_SELECTED_CH')
+                else:
+                    epochs.drop_bad(reject=dict(eeg=dropout_rate), verbose="Error")
 
                 n_after = len(epochs)
                 sub_counts_after[subject_id] = sub_counts_after.get(subject_id, 0) + n_after

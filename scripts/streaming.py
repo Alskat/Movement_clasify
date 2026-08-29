@@ -46,7 +46,7 @@ else:
         "T2": "feet"
     }
 
-ch_number = 7
+ch_number = 27
 
 
 #Todo lo relacionado al stream 
@@ -92,6 +92,13 @@ if ch_number == 7:
     channels = ['C5..', 'C3..', 'C1..', 'Cz..', 'C2..', 'C4..', 'C6..'] #Esto se va a poder seleccionar en el futuro en la GUI      
 elif ch_number ==3: 
     channels = ['C3..','C4..','Cz..']
+elif ch_number == 27: 
+    channels = ['Fp1.', 'Fp2.', 'F7..', 'F3..', 'Fz..', 'F4..', 'F8..', #Frontales 
+                'T7..', 'C3..', 'Cz..', 'C4..', 'T8..', 'Fc1.', 'Fc2.', 'Cp1.', 'Cp2.',  #Linea central
+                'P7..', 'P3..', 'Pz..', 'P4..', 'P8..','O1..', 'O2..',
+                'C5..', 'C1..', 'C2..', 'C6..'
+                ]
+
 available_channels = raw.ch_names #Validamos que existan en el archivo
 
 for channel in channels:

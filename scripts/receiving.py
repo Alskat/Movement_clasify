@@ -41,14 +41,14 @@ slide_group.add_argument(
     "--slide",
     dest="slide",
     action="store_true",
-    help="Activa ventana deslizante con hop de 0.5 segundos."
+    help="Activa ventana deslizante con hop de 0.5 segundos (25%%)."
 )
 
 slide_group.add_argument(
     "--no-slide",
     dest="slide",
     action="store_false",
-    help="Desactiva ventana deslizante; usa ventanas consecutivas de 1 segundo."
+    help="Desactiva ventana deslizante; usa ventanas consecutivas de 2 segundos."
 )
 
 parser.set_defaults(slide=True)
@@ -78,7 +78,7 @@ else:
 
 print(
     "[RECEIVER] Slide/hop: "
-    + ("activo, hop de 0.5 s" if slide else "inactivo, hop de 1.0 s")
+    + ("activo, hop de 0.5 s (25%)" if slide else "inactivo, hop de 2.0 s")
 )
 
 #Variables fijas
@@ -87,7 +87,7 @@ HOST = "127.0.0.1"
 STREAM_PORT = 5005
 CONTROL_PORT = 5006
 
-WINDOW_SAMPLES = 160
+WINDOW_SAMPLES = 320
 
 sock_stream = socket.socket(
     socket.AF_INET,
@@ -187,11 +187,11 @@ try:
             fs = packet["fs"]
             duration = packet["duration"]
             
-            half = int(fs/2)
+            hop = int(WINDOW_SAMPLES * 0.25)
 
             preprocessor = Preprocessor(
                 current_Fs = fs,
-                current_duration = 1.0,
+                current_duration = 2.0,
                 model_path = model_path,
                 aux_path = aux_model_path if use_bin else None,
                 use_bin = use_bin
@@ -231,7 +231,7 @@ try:
             event_buffer.append(current_event)
 
 
-            if len(buffer) == WINDOW_SAMPLES: #Se llena la ventana de 160 muestras
+            if len(buffer) == WINDOW_SAMPLES:
 
                 total_windows += 1
 
@@ -241,18 +241,11 @@ try:
                 )
 
                 
-                if slide: 
-                    print(
-                        f"[WINDOW] "
-                        f"{buffer_count} / {duration*2} | "
-                        f"shape={window.shape}"
-                    )
-                else: 
-                    print(
-                        f"[WINDOW] "
-                        f"{buffer_count} / {duration} | "
-                        f"shape={window.shape}"
-                    )
+                print(
+                    f"[WINDOW] "
+                    f"{buffer_count} | "
+                    f"shape={window.shape}"
+                )
 
                 #preprocesamos la ventana
 
@@ -277,10 +270,10 @@ try:
                 
                 buffer_count += 1
                 if slide:
-                    buffer = buffer[half:] #Deslizamiento del 50%
-                    event_buffer = event_buffer[half:]
+                    buffer = buffer[hop:]
+                    event_buffer = event_buffer[hop:]
                 else:
-                    buffer = [] #Deslizamiento del 50%
+                    buffer = []
                     event_buffer = []
 except KeyboardInterrupt:
     print("\n[RECEIVER] Detenido por el usuario.")
